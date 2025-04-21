@@ -2,10 +2,14 @@ package arr
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"github.com/goccy/go-json"
+	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"io"
 	"net/http"
 	"strconv"
@@ -113,8 +117,9 @@ func (a *Arr) Validate() error {
 }
 
 type Storage struct {
-	Arrs map[string]*Arr // name -> arr
-	mu   sync.RWMutex
+	Arrs   map[string]*Arr // name -> arr
+	mu     sync.RWMutex
+	logger zerolog.Logger
 }
 
 func InferType(host, name string) Type {
@@ -139,7 +144,8 @@ func NewStorage() *Storage {
 		arrs[name] = New(name, a.Host, a.Token, a.Cleanup, a.SkipRepair, a.DownloadUncached)
 	}
 	return &Storage{
-		Arrs: arrs,
+		Arrs:   arrs,
+		logger: logger.New("arr"),
 	}
 }
 
@@ -174,6 +180,33 @@ func (as *Storage) Clear() {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	as.Arrs = make(map[string]*Arr)
+}
+
+func (as *Storage) StartSchedule(ctx context.Context) error {
+	// Schedule the cleanup job every 10 seconds
+	_, err := utils.ScheduleJob(ctx, "10s", nil, as.cleanupArrsQueue)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (as *Storage) cleanupArrsQueue() {
+	arrs := make([]*Arr, 0)
+	for _, arr := range as.Arrs {
+		if !arr.Cleanup {
+			continue
+		}
+		arrs = append(arrs, arr)
+	}
+	if len(arrs) > 0 {
+		as.logger.Trace().Msgf("Cleaning up %d arrs", len(arrs))
+		for _, arr := range arrs {
+			if err := arr.CleanupQueue(); err != nil {
+				as.logger.Error().Err(err).Msgf("Failed to cleanup arr %s", arr.Name)
+			}
+		}
+	}
 }
 
 func (a *Arr) Refresh() error {

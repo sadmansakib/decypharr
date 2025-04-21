@@ -159,7 +159,7 @@ func (q *QBit) createSymlinksWebdav(debridTorrent *debrid.Torrent, rclonePath, t
 
 	remainingFiles := make(map[string]debrid.File)
 	for _, file := range files {
-		remainingFiles[file.Name] = file
+		remainingFiles[utils.EscapePath(file.Name)] = file
 	}
 
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -181,7 +181,7 @@ func (q *QBit) createSymlinksWebdav(debridTorrent *debrid.Torrent, rclonePath, t
 					fullFilePath := filepath.Join(rclonePath, file.Name)
 					fileSymlinkPath := filepath.Join(symlinkPath, file.Name)
 
-					if err := os.Symlink(fullFilePath, fileSymlinkPath); err != nil {
+					if err := os.Symlink(fullFilePath, fileSymlinkPath); err != nil && !os.IsExist(err) {
 						q.logger.Debug().Msgf("Failed to create symlink: %s: %v", fileSymlinkPath, err)
 					} else {
 						q.logger.Info().Msgf("File is ready: %s", file.Name)
@@ -225,7 +225,7 @@ func (q *QBit) createSymlinks(debridTorrent *debrid.Torrent, rclonePath, torrent
 	for _, file := range files {
 		pending[file.Path] = file
 	}
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	filePaths := make([]string, 0, len(pending))
 
@@ -236,7 +236,7 @@ func (q *QBit) createSymlinks(debridTorrent *debrid.Torrent, rclonePath, torrent
 			if _, err := os.Stat(fullFilePath); !os.IsNotExist(err) {
 				q.logger.Info().Msgf("File is ready: %s", file.Name)
 				fileSymlinkPath := filepath.Join(symlinkPath, file.Name)
-				if err := os.Symlink(fullFilePath, fileSymlinkPath); err != nil {
+				if err := os.Symlink(fullFilePath, fileSymlinkPath); err != nil && !os.IsExist(err) {
 					q.logger.Debug().Msgf("Failed to create symlink: %s: %v", fileSymlinkPath, err)
 				}
 				filePaths = append(filePaths, fileSymlinkPath)
@@ -247,7 +247,7 @@ func (q *QBit) createSymlinks(debridTorrent *debrid.Torrent, rclonePath, torrent
 				if _, err := os.Stat(fullFilePath); !os.IsNotExist(err) {
 					q.logger.Info().Msgf("File is ready: %s", file.Path)
 					fileSymlinkPath := filepath.Join(symlinkPath, file.Path)
-					if err := os.Symlink(fullFilePath, fileSymlinkPath); err != nil {
+					if err := os.Symlink(fullFilePath, fileSymlinkPath); err != nil && !os.IsExist(err) {
 						q.logger.Debug().Msgf("Failed to create symlink: %s: %v", fileSymlinkPath, err)
 					}
 					filePaths = append(filePaths, fileSymlinkPath)

@@ -174,6 +174,10 @@ func startServices(ctx context.Context) error {
 		return worker.Start(ctx)
 	})
 
+	safeGo(func() error {
+		return svc.Arr.StartSchedule(ctx)
+	})
+
 	if cfg.Repair.Enabled {
 		safeGo(func() error {
 			err := svc.Repair.Start(ctx)

@@ -9,6 +9,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/debrid/debrid"
 	"golang.org/x/sync/errgroup"
@@ -28,7 +29,7 @@ type Repair struct {
 	Jobs        map[string]*Job
 	arrs        *arr.Storage
 	deb         *debrid.Engine
-	duration    time.Duration
+	interval    string
 	runOnStart  bool
 	ZurgURL     string
 	IsZurg      bool
@@ -42,10 +43,6 @@ type Repair struct {
 
 func New(arrs *arr.Storage, engine *debrid.Engine) *Repair {
 	cfg := config.Get()
-	duration, err := parseSchedule(cfg.Repair.Interval)
-	if err != nil {
-		duration = time.Hour * 24
-	}
 	workers := runtime.NumCPU() * 20
 	if cfg.Repair.Workers > 0 {
 		workers = cfg.Repair.Workers
@@ -53,7 +50,7 @@ func New(arrs *arr.Storage, engine *debrid.Engine) *Repair {
 	r := &Repair{
 		arrs:        arrs,
 		logger:      logger.New("repair"),
-		duration:    duration,
+		interval:    cfg.Repair.Interval,
 		runOnStart:  cfg.Repair.RunOnStart,
 		ZurgURL:     cfg.Repair.ZurgURL,
 		useWebdav:   cfg.Repair.UseWebDav,
@@ -73,7 +70,6 @@ func New(arrs *arr.Storage, engine *debrid.Engine) *Repair {
 }
 
 func (r *Repair) Start(ctx context.Context) error {
-	cfg := config.Get()
 	r.ctx = ctx
 	if r.runOnStart {
 		r.logger.Info().Msgf("Running initial repair")
@@ -84,30 +80,20 @@ func (r *Repair) Start(ctx context.Context) error {
 		}()
 	}
 
-	ticker := time.NewTicker(r.duration)
-	defer ticker.Stop()
-
-	r.logger.Info().Msgf("Starting repair worker with %v interval", r.duration)
-
-	for {
-		select {
-		case <-r.ctx.Done():
-			r.logger.Info().Msg("Repair worker stopped")
-			return nil
-		case t := <-ticker.C:
-			r.logger.Info().Msgf("Running repair at %v", t.Format("15:04:05"))
-			if err := r.AddJob([]string{}, []string{}, r.autoProcess, true); err != nil {
-				r.logger.Error().Err(err).Msg("Error running repair")
-			}
-
-			// If using time-of-day schedule, reset the ticker for next day
-			if strings.Contains(cfg.Repair.Interval, ":") {
-				ticker.Reset(r.duration)
-			}
-
-			r.logger.Info().Msgf("Next scheduled repair at %v", t.Add(r.duration).Format("15:04:05"))
+	job, err := utils.ScheduleJob(r.ctx, r.interval, time.Local, func() {
+		r.logger.Info().Msgf("Repair job started at %s", time.Now().Format("15:04:05"))
+		if err := r.AddJob([]string{}, []string{}, r.autoProcess, true); err != nil {
+			r.logger.Error().Err(err).Msg("Error running repair job")
 		}
+	})
+	if err != nil {
+		r.logger.Error().Err(err).Msg("Error scheduling repair job")
+		return err
 	}
+	if t, err := job.NextRun(); err == nil {
+		r.logger.Info().Msgf("Next repair job scheduled at %s", t.Format("15:04:05"))
+	}
+	return nil
 }
 
 type JobStatus string

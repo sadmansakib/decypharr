@@ -241,12 +241,12 @@ func (c *Cache) refreshDownloadLinks() {
 	for k, v := range downloadLinks {
 		// if link is generated in the last 24 hours, add it to cache
 		timeSince := time.Since(v.Generated)
-		if timeSince < c.autoExpiresLinksAfter {
+		if timeSince < c.autoExpiresLinksAfterDuration {
 			c.downloadLinks.Store(k, downloadLinkCache{
 				Id:        v.Id,
 				AccountId: v.AccountId,
 				Link:      v.DownloadLink,
-				ExpiresAt: v.Generated.Add(c.autoExpiresLinksAfter - timeSince),
+				ExpiresAt: v.Generated.Add(c.autoExpiresLinksAfterDuration - timeSince),
 			})
 		} else {
 			c.downloadLinks.Delete(k)

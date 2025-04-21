@@ -133,8 +133,8 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	torrent.DownloadUncached = false // Set to false, avoid re-downloading
 	torrent, err = c.client.CheckStatus(torrent, true)
 	if err != nil && torrent != nil {
-		// Torrent is likely in progress
-		_ = c.DeleteTorrent(torrent.Id)
+		// Torrent is likely uncached, delete it
+		_ = c.client.DeleteTorrent(torrent.Id) // Delete the newly added un-cached torrent
 		return ct, fmt.Errorf("failed to check status: %w", err)
 	}
 	if torrent == nil {

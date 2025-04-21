@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/go-co-op/gocron/v2"
 	"github.com/goccy/go-json"
 	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/rs/zerolog"
@@ -82,15 +83,18 @@ type Cache struct {
 	repairsInProgress *xsync.MapOf[string, struct{}]
 
 	// config
-	workers                      int
-	torrentRefreshInterval       time.Duration
-	downloadLinksRefreshInterval time.Duration
-	autoExpiresLinksAfter        time.Duration
+	workers                       int
+	torrentRefreshInterval        string
+	downloadLinksRefreshInterval  string
+	autoExpiresLinksAfter         string
+	autoExpiresLinksAfterDuration time.Duration
 
 	// refresh mutex
 	listingRefreshMu       sync.RWMutex // for refreshing torrents
 	downloadLinksRefreshMu sync.RWMutex // for refreshing download links
 	torrentsRefreshMu      sync.RWMutex // for refreshing torrents
+
+	scheduler gocron.Scheduler
 
 	saveSemaphore chan struct{}
 	ctx           context.Context
@@ -98,35 +102,33 @@ type Cache struct {
 
 func New(dc config.Debrid, client types.Client) *Cache {
 	cfg := config.Get()
-	torrentRefreshInterval, err := time.ParseDuration(dc.TorrentsRefreshInterval)
-	if err != nil {
-		torrentRefreshInterval = time.Second * 15
-	}
-	downloadLinksRefreshInterval, err := time.ParseDuration(dc.DownloadLinksRefreshInterval)
-	if err != nil {
-		downloadLinksRefreshInterval = time.Minute * 40
-	}
-	autoExpiresLinksAfter, err := time.ParseDuration(dc.AutoExpireLinksAfter)
-	if err != nil {
-		autoExpiresLinksAfter = time.Hour * 24
+	cet, _ := time.LoadLocation("CET")
+	s, _ := gocron.NewScheduler(gocron.WithLocation(cet))
+
+	autoExpiresLinksAfter, _ := time.ParseDuration(dc.AutoExpireLinksAfter)
+	if autoExpiresLinksAfter == 0 {
+		autoExpiresLinksAfter = 24 * time.Hour
 	}
 	return &Cache{
-		dir:                          path.Join(cfg.Path, "cache", dc.Name), // path to save cache files
-		torrents:                     xsync.NewMapOf[string, *CachedTorrent](),
-		torrentsNames:                xsync.NewMapOf[string, *CachedTorrent](),
-		invalidDownloadLinks:         xsync.NewMapOf[string, string](),
-		client:                       client,
-		logger:                       logger.New(fmt.Sprintf("%s-webdav", client.GetName())),
-		workers:                      dc.Workers,
-		downloadLinks:                xsync.NewMapOf[string, downloadLinkCache](),
-		torrentRefreshInterval:       torrentRefreshInterval,
-		downloadLinksRefreshInterval: downloadLinksRefreshInterval,
-		PropfindResp:                 xsync.NewMapOf[string, PropfindResponse](),
-		folderNaming:                 WebDavFolderNaming(dc.FolderNaming),
-		autoExpiresLinksAfter:        autoExpiresLinksAfter,
-		repairsInProgress:            xsync.NewMapOf[string, struct{}](),
-		saveSemaphore:                make(chan struct{}, 50),
-		ctx:                          context.Background(),
+		dir:                           path.Join(cfg.Path, "cache", dc.Name), // path to save cache files
+		torrents:                      xsync.NewMapOf[string, *CachedTorrent](),
+		torrentsNames:                 xsync.NewMapOf[string, *CachedTorrent](),
+		invalidDownloadLinks:          xsync.NewMapOf[string, string](),
+		client:                        client,
+		logger:                        logger.New(fmt.Sprintf("%s-webdav", client.GetName())),
+		workers:                       dc.Workers,
+		downloadLinks:                 xsync.NewMapOf[string, downloadLinkCache](),
+		torrentRefreshInterval:        dc.TorrentsRefreshInterval,
+		downloadLinksRefreshInterval:  dc.DownloadLinksRefreshInterval,
+		PropfindResp:                  xsync.NewMapOf[string, PropfindResponse](),
+		folderNaming:                  WebDavFolderNaming(dc.FolderNaming),
+		autoExpiresLinksAfter:         dc.AutoExpireLinksAfter,
+		autoExpiresLinksAfterDuration: autoExpiresLinksAfter,
+		repairsInProgress:             xsync.NewMapOf[string, struct{}](),
+		saveSemaphore:                 make(chan struct{}, 50),
+		ctx:                           context.Background(),
+
+		scheduler: s,
 	}
 }
 
@@ -146,9 +148,9 @@ func (c *Cache) Start(ctx context.Context) error {
 	}()
 
 	go func() {
-		err := c.Refresh()
+		err := c.StartSchedule()
 		if err != nil {
-			c.logger.Error().Err(err).Msg("Failed to start cache refresh worker")
+			c.logger.Error().Err(err).Msg("Failed to start cache worker")
 		}
 	}()
 
@@ -584,16 +586,16 @@ func (c *Cache) ProcessTorrent(t *types.Torrent) error {
 	return nil
 }
 
-func (c *Cache) GetDownloadLink(torrentId, filename, fileLink string) string {
+func (c *Cache) GetDownloadLink(torrentId, filename, fileLink string) (string, error) {
 
 	// Check link cache
 	if dl := c.checkDownloadLink(fileLink); dl != "" {
-		return dl
+		return dl, nil
 	}
 
 	ct := c.GetTorrent(torrentId)
 	if ct == nil {
-		return ""
+		return "", fmt.Errorf("torrent not found: %s", torrentId)
 	}
 	file := ct.Files[filename]
 
@@ -601,7 +603,7 @@ func (c *Cache) GetDownloadLink(torrentId, filename, fileLink string) string {
 		// file link is empty, refresh the torrent to get restricted links
 		ct = c.refreshTorrent(ct) // Refresh the torrent from the debrid
 		if ct == nil {
-			return ""
+			return "", fmt.Errorf("failed to refresh torrent: %s", torrentId)
 		} else {
 			file = ct.Files[filename]
 		}
@@ -613,23 +615,21 @@ func (c *Cache) GetDownloadLink(torrentId, filename, fileLink string) string {
 		// Try to reinsert the torrent?
 		newCt, err := c.reInsertTorrent(ct)
 		if err != nil {
-			c.logger.Error().Err(err).Msgf("Failed to reinsert torrent %s", ct.Name)
-			return ""
+			return "", fmt.Errorf("failed to reinsert torrent: %s. %w", ct.Name, err)
 		}
 		ct = newCt
 		file = ct.Files[filename]
 		c.logger.Debug().Msgf("Reinserted torrent %s", ct.Name)
 	}
 
-	c.logger.Trace().Msgf("Getting download link for %s", filename)
+	c.logger.Trace().Msgf("Getting download link for %s(%s)", filename, file.Link)
 	downloadLink, err := c.client.GetDownloadLink(ct.Torrent, &file)
 	if err != nil {
 		if errors.Is(err, request.HosterUnavailableError) {
 			c.logger.Error().Err(err).Msgf("Hoster is unavailable. Triggering repair for %s", ct.Name)
 			newCt, err := c.reInsertTorrent(ct)
 			if err != nil {
-				c.logger.Error().Err(err).Msgf("Failed to reinsert torrent %s", ct.Name)
-				return ""
+				return "", fmt.Errorf("failed to reinsert torrent: %w", err)
 			}
 			ct = newCt
 			c.logger.Debug().Msgf("Reinserted torrent %s", ct.Name)
@@ -637,30 +637,26 @@ func (c *Cache) GetDownloadLink(torrentId, filename, fileLink string) string {
 			// Retry getting the download link
 			downloadLink, err = c.client.GetDownloadLink(ct.Torrent, &file)
 			if err != nil {
-				c.logger.Error().Err(err).Msgf("Failed to get download link for %s", file.Link)
-				return ""
+				return "", err
 			}
 			if downloadLink == nil {
-				c.logger.Debug().Msgf("Download link is empty for %s", file.Link)
-				return ""
+				return "", fmt.Errorf("download link is empty for %s", file.Link)
 			}
 			c.updateDownloadLink(downloadLink)
-			return downloadLink.DownloadLink
+			return "", nil
 		} else if errors.Is(err, request.TrafficExceededError) {
 			// This is likely a fair usage limit error
 			c.logger.Error().Err(err).Msgf("Traffic exceeded for %s", ct.Name)
 		} else {
-			c.logger.Error().Err(err).Msgf("Failed to get download link for %s", file.Link)
-			return ""
+			return "", fmt.Errorf("failed to get download link: %w", err)
 		}
 	}
 
 	if downloadLink == nil {
-		c.logger.Debug().Msgf("Download link is empty for %s", file.Link)
-		return ""
+		return "", fmt.Errorf("download link is empty for %s", file.Link)
 	}
 	c.updateDownloadLink(downloadLink)
-	return downloadLink.DownloadLink
+	return downloadLink.DownloadLink, nil
 }
 
 func (c *Cache) GenerateDownloadLinks(t *CachedTorrent) {
@@ -700,10 +696,11 @@ func (c *Cache) AddTorrent(t *types.Torrent) error {
 }
 
 func (c *Cache) updateDownloadLink(dl *types.DownloadLink) {
+	expiresAt, _ := time.ParseDuration(c.autoExpiresLinksAfter)
 	c.downloadLinks.Store(dl.Link, downloadLinkCache{
 		Id:        dl.Id,
 		Link:      dl.DownloadLink,
-		ExpiresAt: time.Now().Add(c.autoExpiresLinksAfter),
+		ExpiresAt: time.Now().Add(expiresAt),
 		AccountId: dl.AccountId,
 	})
 }

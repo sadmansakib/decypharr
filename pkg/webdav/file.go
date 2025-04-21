@@ -57,18 +57,21 @@ func (f *File) Close() error {
 	return nil
 }
 
-func (f *File) getDownloadLink() string {
+func (f *File) getDownloadLink() (string, error) {
 	// Check if we already have a final URL cached
 
 	if f.downloadLink != "" && isValidURL(f.downloadLink) {
-		return f.downloadLink
+		return f.downloadLink, nil
 	}
-	downloadLink := f.cache.GetDownloadLink(f.torrentId, f.name, f.link)
+	downloadLink, err := f.cache.GetDownloadLink(f.torrentId, f.name, f.link)
+	if err != nil {
+		return "", err
+	}
 	if downloadLink != "" && isValidURL(downloadLink) {
 		f.downloadLink = downloadLink
-		return downloadLink
+		return downloadLink, nil
 	}
-	return ""
+	return "", fmt.Errorf("download link not found")
 }
 
 func (f *File) stream() (*http.Response, error) {
@@ -79,7 +82,11 @@ func (f *File) stream() (*http.Response, error) {
 		downloadLink string
 	)
 
-	downloadLink = f.getDownloadLink() // Uses the first API key
+	downloadLink, err = f.getDownloadLink()
+	if err != nil {
+		_log.Trace().Msgf("Failed to get download link for %s. %s", f.name, err)
+		return nil, io.EOF
+	}
 	if downloadLink == "" {
 		_log.Trace().Msgf("Failed to get download link for %s. Empty download link", f.name)
 		return nil, io.EOF
@@ -101,9 +108,7 @@ func (f *File) stream() (*http.Response, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-
 		f.downloadLink = ""
-
 		closeResp := func() {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -117,7 +122,7 @@ func (f *File) stream() (*http.Response, error) {
 				return nil, io.EOF
 			}
 			if strings.Contains(string(b), "You can not download this file because you have exceeded your traffic on this hoster") {
-				_log.Trace().Msgf("Failed to get download link for %s. Download link expired", f.name)
+				_log.Trace().Msgf("Bandwidth exceeded for %s. Download token will be disabled if you have more than one", f.name)
 				f.cache.MarkDownloadLinkAsInvalid(f.link, downloadLink, "bandwidth_exceeded")
 				// Retry with a different API key if it's available
 				return f.stream()
@@ -132,7 +137,11 @@ func (f *File) stream() (*http.Response, error) {
 			// Regenerate a new download link
 			f.cache.MarkDownloadLinkAsInvalid(f.link, downloadLink, "link_not_found")
 			// Generate a new download link
-			downloadLink = f.getDownloadLink()
+			downloadLink, err = f.getDownloadLink()
+			if err != nil {
+				_log.Trace().Msgf("Failed to get download link for %s. %s", f.name, err)
+				return nil, io.EOF
+			}
 			if downloadLink == "" {
 				_log.Trace().Msgf("Failed to get download link for %s", f.name)
 				return nil, io.EOF

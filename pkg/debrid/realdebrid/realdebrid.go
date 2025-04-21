@@ -450,15 +450,17 @@ func (r *RealDebrid) _getDownloadLink(file *types.File) (*types.DownloadLink, er
 			return nil, err
 		}
 		switch data.ErrorCode {
+		case 19:
+			return nil, request.HosterUnavailableError // File has been removed
 		case 23:
 			return nil, request.TrafficExceededError
 		case 24:
 			return nil, request.HosterUnavailableError // Link has been nerfed
-		case 19:
-			return nil, request.HosterUnavailableError // File has been removed
-		case 36:
-			return nil, request.TrafficExceededError // traffic exceeded
 		case 34:
+			return nil, request.TrafficExceededError // traffic exceeded
+		case 35:
+			return nil, request.HosterUnavailableError
+		case 36:
 			return nil, request.TrafficExceededError // traffic exceeded
 		default:
 			return nil, fmt.Errorf("realdebrid API error: Status: %d || Code: %d", resp.StatusCode, data.ErrorCode)
@@ -489,48 +491,36 @@ func (r *RealDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (*types
 
 	if r.currentDownloadKey == "" {
 		// If no download key is set, use the first one
-		r.DownloadKeys.Range(func(key string, value types.Account) bool {
-			if !value.Disabled {
-				r.currentDownloadKey = value.Token
-				return false
-			}
-			return true
-		})
+		accounts := r.getActiveAccounts()
+		if len(accounts) < 1 {
+			// No active download keys. It's likely that the key has reached bandwidth limit
+			return nil, fmt.Errorf("no active download keys")
+		}
+		r.currentDownloadKey = accounts[0].Token
 	}
 
 	r.downloadClient.SetHeader("Authorization", fmt.Sprintf("Bearer %s", r.currentDownloadKey))
 	downloadLink, err := r._getDownloadLink(file)
+	retries := 0
 	if err != nil {
-		accountsFunc := func() (*types.DownloadLink, error) {
-			accounts := r.getActiveAccounts()
-			var err error
-			if len(accounts) < 1 {
-				// No active download keys. It's likely that the key has reached bandwidth limit
-				return nil, fmt.Errorf("no active download keys")
-			}
-			for _, account := range accounts {
-				r.downloadClient.SetHeader("Authorization", fmt.Sprintf("Bearer %s", account.Token))
-				downloadLink, err := r._getDownloadLink(file)
-				if err != nil {
-					if errors.Is(err, request.TrafficExceededError) {
-						continue
-					}
-					// If the error is not traffic exceeded, skip generating the link with a new key
-					return nil, err
-				} else {
-					// If we successfully generated a link, break the loop
-					downloadLink.AccountId = account.ID
-					return downloadLink, nil
-				}
-
-			}
-			// If we reach here, it means all keys have been exhausted
-			if errors.Is(err, request.TrafficExceededError) {
-				return nil, request.TrafficExceededError
-			}
-			return nil, fmt.Errorf("failed to generate download link: %w", err)
+		if errors.Is(err, request.TrafficExceededError) {
+			// Retries generating
+			retries = 4
+		} else {
+			// If the error is not traffic exceeded, return the error
+			return nil, err
 		}
-		return accountsFunc()
+	}
+	for retries > 0 {
+		downloadLink, err = r._getDownloadLink(file)
+		if err == nil {
+			return downloadLink, nil
+		}
+		if !errors.Is(err, request.TrafficExceededError) {
+			return nil, err
+		}
+		// Add a delay before retrying
+		time.Sleep(5 * time.Second)
 	}
 	return downloadLink, nil
 }
@@ -718,11 +708,9 @@ func (r *RealDebrid) DisableAccount(accountId string) {
 		r.logger.Info().Msgf("Cannot disable last account: %s", accountId)
 		return
 	}
+	r.currentDownloadKey = ""
 	if value, ok := r.DownloadKeys.Load(accountId); ok {
 		value.Disabled = true
-		if value.Token == r.currentDownloadKey {
-			r.currentDownloadKey = ""
-		}
 		r.DownloadKeys.Store(accountId, value)
 		r.logger.Info().Msgf("Disabled account Index: %s", value.ID)
 	}
