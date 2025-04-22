@@ -102,13 +102,13 @@ func (ui *Handler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if setup is needed
 		cfg := config.Get()
-		if cfg.NeedsAuth() && r.URL.Path != "/auth" {
-			http.Redirect(w, r, "/auth", http.StatusSeeOther)
+		if !cfg.UseAuth {
+			next.ServeHTTP(w, r)
 			return
 		}
 
-		if !cfg.UseAuth {
-			next.ServeHTTP(w, r)
+		if cfg.NeedsAuth() && r.URL.Path != "/auth" {
+			http.Redirect(w, r, "/auth", http.StatusSeeOther)
 			return
 		}
 
@@ -147,6 +147,11 @@ func (ui *Handler) verifyAuth(username, password string) bool {
 }
 
 func (ui *Handler) LoginHandler(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Get()
+	if cfg.NeedsAuth() {
+		http.Redirect(w, r, "/auth", http.StatusSeeOther)
+		return
+	}
 	if r.Method == "GET" {
 		data := map[string]interface{}{
 			"Page":  "login",
@@ -196,7 +201,7 @@ func (ui *Handler) SetupHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 	authCfg := cfg.GetAuth()
 
-	if !cfg.NeedsSetup() {
+	if !cfg.NeedsAuth() {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}

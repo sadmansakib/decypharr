@@ -129,7 +129,7 @@ func (q *QBit) ProcessFiles(torrent *Torrent, debridTorrent *debrid.Torrent, arr
 			torrentFolderNoExt := utils.RemoveExtension(debridTorrent.Name)
 
 			torrentSymlinkPath, err = q.createSymlinksWebdav(debridTorrent, rclonePath, torrentFolderNoExt) // /mnt/symlinks/{category}/MyTVShow/
-			q.logger.Debug().Msgf("Process Completed in %s", time.Since(timer))
+			q.logger.Debug().Msgf("Torrent adding process completed in %s", time.Since(timer))
 
 		} else {
 			// User is using either zurg or debrid webdav
