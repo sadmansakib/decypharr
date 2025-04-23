@@ -27,9 +27,9 @@ var sharedClient = &http.Client{
 }
 
 type File struct {
-	cache     *debrid.Cache
-	fileId    string
-	torrentId string
+	cache       *debrid.Cache
+	fileId      string
+	torrentName string
 
 	modTime time.Time
 
@@ -63,7 +63,7 @@ func (f *File) getDownloadLink() (string, error) {
 	if f.downloadLink != "" && isValidURL(f.downloadLink) {
 		return f.downloadLink, nil
 	}
-	downloadLink, err := f.cache.GetDownloadLink(f.torrentId, f.name, f.link)
+	downloadLink, err := f.cache.GetDownloadLink(f.torrentName, f.name, f.link)
 	if err != nil {
 		return "", err
 	}
@@ -84,6 +84,7 @@ func (f *File) stream() (*http.Response, error) {
 
 	downloadLink, err = f.getDownloadLink()
 	if err != nil {
+
 		_log.Trace().Msgf("Failed to get download link for %s. %s", f.name, err)
 		return nil, io.EOF
 	}

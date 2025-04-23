@@ -58,12 +58,6 @@ func (q *QBit) Process(ctx context.Context, magnet *utils.Magnet, category strin
 	isSymlink := ctx.Value("isSymlink").(bool)
 	debridTorrent, err := db.ProcessTorrent(svc.Debrid, magnet, a, isSymlink, false)
 	if err != nil || debridTorrent == nil {
-		if debridTorrent != nil {
-			dbClient := service.GetDebrid().GetClient(debridTorrent.Debrid)
-			go func() {
-				_ = dbClient.DeleteTorrent(debridTorrent.Id)
-			}()
-		}
 		if err == nil {
 			err = fmt.Errorf("failed to process torrent")
 		}
@@ -83,12 +77,6 @@ func (q *QBit) ProcessFiles(torrent *Torrent, debridTorrent *debrid.Torrent, arr
 		dbT, err := client.CheckStatus(debridTorrent, isSymlink)
 		if err != nil {
 			q.logger.Error().Msgf("Error checking status: %v", err)
-			go func() {
-				err := client.DeleteTorrent(debridTorrent.Id)
-				if err != nil {
-					q.logger.Error().Msgf("Error deleting torrent: %v", err)
-				}
-			}()
 			q.MarkAsFailed(torrent)
 			if err := arr.Refresh(); err != nil {
 				q.logger.Error().Msgf("Error refreshing arr: %v", err)
@@ -141,10 +129,7 @@ func (q *QBit) ProcessFiles(torrent *Torrent, debridTorrent *debrid.Torrent, arr
 	if err != nil {
 		q.MarkAsFailed(torrent)
 		go func() {
-			err := client.DeleteTorrent(debridTorrent.Id)
-			if err != nil {
-				q.logger.Error().Msgf("Error deleting torrent: %v", err)
-			}
+			_ = client.DeleteTorrent(debridTorrent.Id)
 		}()
 		q.logger.Info().Msgf("Error: %v", err)
 		return

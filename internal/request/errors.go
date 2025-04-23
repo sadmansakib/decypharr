@@ -27,3 +27,9 @@ var ErrLinkBroken = &HTTPError{
 	Message:    "File is unavailable",
 	Code:       "file_unavailable",
 }
+
+var TorrentNotFoundError = &HTTPError{
+	StatusCode: 404,
+	Message:    "Torrent not found",
+	Code:       "torrent_not_found",
+}

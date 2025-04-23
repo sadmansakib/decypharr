@@ -232,12 +232,14 @@ func (ad *AllDebrid) CheckStatus(torrent *types.Torrent, isSymlink bool) (*types
 			break
 		} else if slices.Contains(ad.GetDownloadingStatus(), status) {
 			if !torrent.DownloadUncached {
+				_ = ad.DeleteTorrent(torrent.Id)
 				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
 			}
 			// Break out of the loop if the torrent is downloading.
 			// This is necessary to prevent infinite loop since we moved to sync downloading and async processing
 			return torrent, nil
 		} else {
+			_ = ad.DeleteTorrent(torrent.Id)
 			return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
 		}
 

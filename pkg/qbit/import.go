@@ -1,7 +1,6 @@
 package qbit
 
 import (
-	"fmt"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/debrid"
 	"github.com/sirrobot01/decypharr/pkg/service"
@@ -71,16 +70,7 @@ func (i *ImportRequest) Process(q *QBit) (err error) {
 	svc := service.GetService()
 	torrent := createTorrentFromMagnet(i.Magnet, i.Arr.Name, "manual")
 	debridTorrent, err := debrid.ProcessTorrent(svc.Debrid, i.Magnet, i.Arr, i.IsSymlink, i.DownloadUncached)
-	if err != nil || debridTorrent == nil {
-		if debridTorrent != nil {
-			dbClient := service.GetDebrid().GetClient(debridTorrent.Debrid)
-			go func() {
-				_ = dbClient.DeleteTorrent(debridTorrent.Id)
-			}()
-		}
-		if err == nil {
-			err = fmt.Errorf("failed to process torrent")
-		}
+	if err != nil {
 		return err
 	}
 	torrent = q.UpdateTorrentMin(torrent, debridTorrent)

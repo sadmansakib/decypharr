@@ -266,12 +266,23 @@ func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 	url := fmt.Sprintf("%s/torrents/info/%s", r.Host, t.Id)
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
-	resp, err := r.client.MakeRequest(req)
+	resp, err := r.client.Do(req)
 	if err != nil {
 		return err
 	}
+	defer resp.Body.Close()
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return request.TorrentNotFoundError
+		}
+		return fmt.Errorf("realdebrid API error: Status: %d || Body: %s", resp.StatusCode, string(bodyBytes))
+	}
 	var data torrentInfo
-	err = json.Unmarshal(resp, &data)
+	err = json.Unmarshal(bodyBytes, &data)
 	if err != nil {
 		return err
 	}
@@ -348,10 +359,12 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent, isSymlink bool) (*types.Torre
 			break
 		} else if slices.Contains(r.GetDownloadingStatus(), status) {
 			if !t.DownloadUncached {
+				_ = r.DeleteTorrent(t.Id)
 				return t, fmt.Errorf("torrent: %s not cached", t.Name)
 			}
 			return t, nil
 		} else {
+			_ = r.DeleteTorrent(t.Id)
 			return t, fmt.Errorf("torrent: %s has error: %s", t.Name, status)
 		}
 

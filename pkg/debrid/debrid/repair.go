@@ -12,6 +12,29 @@ import (
 	"time"
 )
 
+type reInsertRequest struct {
+	result *CachedTorrent
+	err    error
+	done   chan struct{}
+}
+
+func newReInsertRequest() *reInsertRequest {
+	return &reInsertRequest{
+		done: make(chan struct{}),
+	}
+}
+
+func (r *reInsertRequest) Complete(result *CachedTorrent, err error) {
+	r.result = result
+	r.err = err
+	close(r.done)
+}
+
+func (r *reInsertRequest) Wait() (*CachedTorrent, error) {
+	<-r.done
+	return r.result, r.err
+}
+
 func (c *Cache) IsTorrentBroken(t *CachedTorrent, filenames []string) bool {
 	// Check torrent files
 
@@ -80,8 +103,8 @@ func (c *Cache) repairWorker() {
 		c.logger.Debug().Str("torrentId", req.TorrentID).Msg("Received repair request")
 
 		// Get the torrent from the cache
-		cachedTorrent, ok := c.torrents.Load(torrentId)
-		if !ok || cachedTorrent == nil {
+		cachedTorrent := c.GetTorrent(torrentId)
+		if cachedTorrent == nil {
 			c.logger.Warn().Str("torrentId", torrentId).Msg("Torrent not found in cache")
 			continue
 		}
@@ -107,11 +130,21 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	// Check if Magnet is not empty, if empty, reconstruct the magnet
 	torrent := ct.Torrent
 	oldID := torrent.Id // Store the old ID
-	if _, ok := c.repairsInProgress.Load(oldID); ok {
-		return ct, fmt.Errorf("repair already in progress for torrent %s", torrent.Id)
+	if _, ok := c.failedToReinsert.Load(oldID); ok {
+		return ct, fmt.Errorf("can't retry re-insert for %s", torrent.Id)
 	}
-	c.repairsInProgress.Store(oldID, struct{}{})
-	defer c.repairsInProgress.Delete(oldID)
+	if reqI, inFlight := c.repairRequest.Load(oldID); inFlight {
+		req := reqI.(*reInsertRequest)
+		c.logger.Debug().Msgf("Waiting for existing reinsert request to complete for torrent %s", oldID)
+		return req.Wait()
+	}
+	req := newReInsertRequest()
+	c.repairRequest.Store(oldID, req)
+
+	// Make sure we clean up even if there's a panic
+	defer func() {
+		c.repairRequest.Delete(oldID)
+	}()
 
 	if torrent.Magnet == nil {
 		torrent.Magnet = utils.ConstructMagnet(torrent.InfoHash, torrent.Name)
@@ -122,24 +155,24 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	var err error
 	torrent, err = c.client.SubmitMagnet(torrent)
 	if err != nil {
+		c.failedToReinsert.Store(oldID, struct{}{})
 		// Remove the old torrent from the cache and debrid service
 		return ct, fmt.Errorf("failed to submit magnet: %w", err)
 	}
 
 	// Check if the torrent was submitted
 	if torrent == nil || torrent.Id == "" {
+		c.failedToReinsert.Store(oldID, struct{}{})
 		return ct, fmt.Errorf("failed to submit magnet: empty torrent")
 	}
 	torrent.DownloadUncached = false // Set to false, avoid re-downloading
 	torrent, err = c.client.CheckStatus(torrent, true)
 	if err != nil && torrent != nil {
-		// Torrent is likely uncached, delete it
-		if err := c.client.DeleteTorrent(torrent.Id); err != nil {
-			c.logger.Error().Err(err).Str("torrentId", torrent.Id).Msg("Failed to delete torrent")
-		} // Delete the newly added un-cached torrent
+		c.failedToReinsert.Store(oldID, struct{}{})
 		return ct, fmt.Errorf("failed to check status: %w", err)
 	}
 	if torrent == nil {
+		c.failedToReinsert.Store(oldID, struct{}{})
 		return ct, fmt.Errorf("failed to check status: empty torrent")
 	}
 
@@ -150,16 +183,8 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	}
 	for _, f := range torrent.Files {
 		if f.Link == "" {
-			// Delete the new torrent
-			_ = c.DeleteTorrent(torrent.Id)
+			c.failedToReinsert.Store(oldID, struct{}{})
 			return ct, fmt.Errorf("failed to reinsert torrent: empty link")
-		}
-	}
-	
-	// We can safely delete the old torrent here
-	if oldID != "" {
-		if err := c.DeleteTorrent(oldID); err != nil {
-			return ct, fmt.Errorf("failed to delete old torrent: %w", err)
 		}
 	}
 	ct = &CachedTorrent{
@@ -169,7 +194,16 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	}
 	c.setTorrent(ct)
 	c.RefreshListings(true)
-	c.logger.Debug().Str("torrentId", torrent.Id).Msg("Reinserted torrent")
+
+	// We can safely delete the old torrent here
+	if oldID != "" {
+		if err := c.DeleteTorrent(oldID); err != nil {
+			return ct, fmt.Errorf("failed to delete old torrent: %w", err)
+		}
+	}
+
+	req.Complete(ct, err)
+	c.failedToReinsert.Delete(oldID) // Delete the old torrent from the failed list
 
 	return ct, nil
 }

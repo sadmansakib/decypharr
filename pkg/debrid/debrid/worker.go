@@ -64,7 +64,7 @@ func (c *Cache) cleanupWorker() {
 	}
 
 	deletedTorrents := make([]string, 0)
-	c.torrents.Range(func(key string, _ *CachedTorrent) bool {
+	c.torrents.Range(func(key string, _ string) bool {
 		if _, exists := idStore[key]; !exists {
 			deletedTorrents = append(deletedTorrents, key)
 		}
