@@ -130,7 +130,7 @@ func (c *Config) loadConfig() error {
 			return fmt.Errorf("error unmarshaling config: %w", err)
 		}
 	}
-	return nil
+	return c.Save()
 }
 
 func validateDebrids(debrids []Debrid) error {
@@ -359,7 +359,7 @@ func (c *Config) createConfig(path string) error {
 		Categories:      []string{"sonarr", "radarr"},
 		RefreshInterval: 15,
 	}
-	return c.Save()
+	return nil
 }
 
 // Reload forces a reload of the configuration from disk

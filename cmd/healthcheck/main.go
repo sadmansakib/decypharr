@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"flag"
@@ -8,6 +9,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -46,19 +48,24 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	baseUrl := cmp.Or(cfg.URLBase, "/")
+	if !strings.HasPrefix(baseUrl, "/") {
+		baseUrl = "/" + baseUrl
+	}
+
 	// Check qBittorrent API
-	if checkQbitAPI(ctx, port) {
+	if checkQbitAPI(ctx, baseUrl, port) {
 		status.QbitAPI = true
 	}
 
 	// Check Web UI
-	if checkWebUI(ctx, port) {
+	if checkWebUI(ctx, baseUrl, port) {
 		status.WebUI = true
 	}
 
 	// Check WebDAV if enabled
 	if webdavPath != "" {
-		if checkWebDAV(ctx, port, webdavPath) {
+		if checkWebDAV(ctx, baseUrl, port, webdavPath) {
 			status.WebDAVService = true
 		}
 	} else {
@@ -94,8 +101,9 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-func checkQbitAPI(ctx context.Context, port string) bool {
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%s/api/v2/app/version", port), nil)
+func checkQbitAPI(ctx context.Context, baseUrl, port string) bool {
+	url := fmt.Sprintf("http://localhost:%s%sapi/v2/app/version", port, baseUrl)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return false
 	}
@@ -109,8 +117,8 @@ func checkQbitAPI(ctx context.Context, port string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func checkWebUI(ctx context.Context, port string) bool {
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%s/", port), nil)
+func checkWebUI(ctx context.Context, baseUrl, port string) bool {
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%s%s", port, baseUrl), nil)
 	if err != nil {
 		return false
 	}
@@ -124,8 +132,8 @@ func checkWebUI(ctx context.Context, port string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func checkWebDAV(ctx context.Context, port, path string) bool {
-	url := fmt.Sprintf("http://localhost:%s/webdav/%s", port, path)
+func checkWebDAV(ctx context.Context, baseUrl, port, path string) bool {
+	url := fmt.Sprintf("http://localhost:%s%swebdav/%s", port, baseUrl, path)
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", url, nil)
 	if err != nil {
 		return false

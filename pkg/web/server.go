@@ -1,12 +1,14 @@
 package web
 
 import (
+	"cmp"
 	"embed"
 	"github.com/gorilla/sessions"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/pkg/qbit"
 	"html/template"
+	"os"
 )
 
 var restartFunc func()
@@ -61,7 +63,8 @@ func New(qbit *qbit.QBit) *Handler {
 }
 
 var (
-	store     = sessions.NewCookieStore([]byte("your-secret-key"))
+	secretKey = cmp.Or(os.Getenv("DECYPHARR_SECRET_KEY"), "\"wqj(v%lj*!-+kf@4&i95rhh_!5_px5qnuwqbr%cjrvrozz_r*(\"")
+	store     = sessions.NewCookieStore([]byte(secretKey))
 	templates *template.Template
 )
 
