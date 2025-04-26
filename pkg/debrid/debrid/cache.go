@@ -117,7 +117,7 @@ func New(dc config.Debrid, client types.Client) *Cache {
 	}
 	return &Cache{
 		dir:                           filepath.Join(cfg.Path, "cache", dc.Name), // path to save cache files
-		torrents:                      xsync.NewMapOf[string, *CachedTorrent](),
+		torrents:                      xsync.NewMapOf[string, string](),
 		torrentsNames:                 xsync.NewMapOf[string, *CachedTorrent](),
 		invalidDownloadLinks:          xsync.NewMapOf[string, string](),
 		client:                        client,
@@ -644,11 +644,12 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 			}
 		}() // defer delete from debrid
 
-		if t, ok := c.torrentsNames.Load(torrentName); ok {
+		if t, ok := c.torrentsNames.Load(torrentName); ok && t.Id == id {
 			newFiles := map[string]types.File{}
 			newId := t.Id
 			for _, file := range t.Files {
 				if file.TorrentId != "" && file.TorrentId != id {
+					newId = file.TorrentId
 					newFiles[file.Name] = file
 				}
 			}

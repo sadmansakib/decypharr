@@ -221,7 +221,10 @@ func (ui *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if len(updatedConfig.Debrids) > 0 {
 		currentConfig.Debrids = updatedConfig.Debrids
 		// Clear legacy single debrid if using array
+	}
 
+	if len(updatedConfig.Arrs) > 0 {
+		currentConfig.Arrs = updatedConfig.Arrs
 	}
 
 	// Update Arrs through the service
