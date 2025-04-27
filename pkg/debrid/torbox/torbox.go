@@ -11,11 +11,13 @@ import (
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/version"
 	"mime/multipart"
 	"net/http"
 	gourl "net/url"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,6 +43,7 @@ func New(dc config.Debrid) *Torbox {
 
 	headers := map[string]string{
 		"Authorization": fmt.Sprintf("Bearer %s", dc.APIKey),
+		"User-Agent":    fmt.Sprintf("Decypharr/%s (%s; %s)", version.GetInfo(), runtime.GOOS, runtime.GOARCH),
 	}
 	_log := logger.New(dc.Name)
 	client := request.New(
@@ -259,14 +262,12 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent, isSymlink bool) (*types.To
 			break
 		} else if slices.Contains(tb.GetDownloadingStatus(), status) {
 			if !torrent.DownloadUncached {
-				_ = tb.DeleteTorrent(torrent.Id)
 				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
 			}
 			// Break out of the loop if the torrent is downloading.
 			// This is necessary to prevent infinite loop since we moved to sync downloading and async processing
 			return torrent, nil
 		} else {
-			_ = tb.DeleteTorrent(torrent.Id)
 			return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
 		}
 

@@ -193,18 +193,25 @@
                 <div class="setup-step d-none" id="step3">
                     <div class="section mb-5">
                         <div class="row">
-                            <div class="col-md-6 mb-3">
+                            <div class="col-md-4 mb-3">
                                 <label class="form-label" for="qbit.download_folder">Symlink/Download Folder</label>
                                 <input type="text" class="form-control" name="qbit.download_folder" id="qbit.download_folder">
+                                <small class="form-text text-muted">Folder where the downloaded files will be stored</small>
                             </div>
-                            <div class="col-md-6 mb-3">
+                            <div class="col-md-3 mb-3">
                                 <label class="form-label" for="qbit.refresh_interval">Refresh Interval (seconds)</label>
                                 <input type="number" class="form-control" name="qbit.refresh_interval" id="qbit.refresh_interval">
+                            </div>
+                            <div class="col-md-5 mb-3">
+                                <label class="form-label" for="qbit.max_downloads">Maximum Downloads Limit</label>
+                                <input type="number" class="form-control" name="qbit.max_downloads" id="qbit.max_downloads">
+                                <small class="form-text text-muted">Maximum number of simultaneous local downloads across all torrents</small>
                             </div>
                             <div class="col mb-3">
                                 <div class="form-check me-3 d-inline-block">
                                     <input type="checkbox" class="form-check-input" name="qbit.skip_pre_cache" id="qbit.skip_pre_cache">
-                                    <label class="form-check-label" for="qbit.skip_pre_cache">Disable Pre-Cache On Download (unchecking this caches a tiny part of your file to speed up import)</label>
+                                    <label class="form-check-label" for="qbit.skip_pre_cache">Disable Pre-Cache On Download</label>
+                                    <small class="form-text text-muted">Unchecking this caches a tiny part of your file to speed up import</small>
                                 </div>
                             </div>
                         </div>
@@ -248,39 +255,45 @@
                         </div>
                         <div id="repairCol" class="d-none">
                             <div class="row">
-                                <div class="col-md-3 mb-3">
+                                <div class="col-md-4 mb-3">
                                     <label class="form-label" for="repair.interval">Interval</label>
                                     <input type="text" class="form-control" name="repair.interval" id="repair.interval" placeholder="e.g., 24h">
+                                    <small class="form-text text-muted">Interval for the repair process(e.g., 24h, 1d, 03:00)</small>
                                 </div>
-                                <div class="col-md-4 mb-3">
+                                <div class="col-md-5 mb-3">
                                     <label class="form-label" for="repair.zurg_url">Zurg URL</label>
                                     <input type="text" class="form-control" name="repair.zurg_url" id="repair.zurg_url" placeholder="http://zurg:9999">
+                                    <small class="form-text text-muted">Speeds up the repair process by using Zurg</small>
                                 </div>
                             </div>
                             <div class="row">
-                                <div class="col-md-2 mb-3">
+                                <div class="col-md-3 mb-3">
                                     <div class="form-check">
                                         <input type="checkbox" class="form-check-input" name="repair.use_webdav" id="repair.use_webdav">
                                         <label class="form-check-label" for="repair.use_webdav">Use Webdav</label>
                                     </div>
+                                    <small class="form-text text-muted">Use Internal Webdav for repair(make sure webdav is enabled in the debrid section</small>
                                 </div>
-                                <div class="col-md-2 mb-3">
+                                <div class="col-md-3 mb-3">
                                     <div class="form-check">
                                         <input type="checkbox" class="form-check-input" name="repair.run_on_start" id="repair.run_on_start">
                                         <label class="form-check-label" for="repair.run_on_start">Run on Start</label>
                                     </div>
+                                    <small class="form-text text-muted">Run repair on startup</small>
                                 </div>
                                 <div class="col-md-3 mb-3">
                                     <div class="form-check">
                                         <input type="checkbox" class="form-check-input" name="repair.reinsert" id="repair.reinsert">
                                         <label class="form-check-label" for="repair.reinsert">Re-Insert Nerfed Release</label>
                                     </div>
+                                    <small class="form-text text-muted">Tries to autofix broken releases by re-inserting the torrent</small>
                                 </div>
-                                <div class="col mb-3">
+                                <div class="col-md-3 mb-3">
                                     <div class="form-check">
                                         <input type="checkbox" class="form-check-input" name="repair.auto_process" id="repair.auto_process">
-                                        <label class="form-check-label" for="repair.auto_process">Auto Process(Scheduled jobs will be auto-processed)</label>
+                                        <label class="form-check-label" for="repair.auto_process">Auto Process</label>
                                     </div>
+                                    <small class="form-text text-muted">Automatically process the repair job(delete broken symlinks and searches the arr again)</small>
                                 </div>
                             </div>
                         </div>
@@ -321,28 +334,40 @@
         <div class="col-md-6 mb-3">
             <label class="form-label" for="debrid[${index}].api_key" >API Key</label>
             <input type="password" class="form-control" name="debrid[${index}].api_key" id="debrid[${index}].api_key" required>
+            <small class="form-text text-muted">API Key for the debrid service</small>
         </div>
         <div class="col-md-6 mb-3">
-            <label class="form-label" for="debrid[${index}].folder" >Mount Folder</label>
+            <label class="form-label" for="debrid[${index}].folder">Mount/Rclone Folder</label>
             <input type="text" class="form-control" name="debrid[${index}].folder" id="debrid[${index}].folder" placeholder="e.g. /mnt/remote/realdebrid" required>
+            <small class="form-text text-muted">Path to where you've mounted the debrid files. Usually your rclone path</small>
         </div>
         <div class="col-md-6 mb-3">
             <label class="form-label" for="debrid[${index}].rate_limit" >Rate Limit</label>
             <input type="text" class="form-control" name="debrid[${index}].rate_limit" id="debrid[${index}].rate_limit" placeholder="e.g., 200/minute" value="250/minute">
+            <small class="form-text text-muted">Rate limit for the debrid service. Confirm your debrid service rate limit</small>
         </div>
-        <div class="col-12">
-            <div class="form-check me-3 d-inline-block">
+    </div>
+    <div class="row">
+        <div class="col-md-4">
+             <div class="form-check me-3">
                 <input type="checkbox" class="form-check-input" name="debrid[${index}].download_uncached" id="debrid[${index}].download_uncached">
-                <label class="form-check-label" for="debrid[${index}].download_uncached" >Download Uncached</label>
+                <label class="form-check-label" for="debrid[${index}].download_uncached">Download Uncached</label>
             </div>
-            <div class="form-check me-3 d-inline-block">
+            <small class="form-text text-muted">Download uncached files from the debrid service</small>
+        </div>
+        <div class="col-md-4">
+            <div class="form-check me-3">
                 <input type="checkbox" class="form-check-input" name="debrid[${index}].check_cached" id="debrid[${index}].check_cached">
-                <label class="form-check-label" for="debrid[${index}].check_cached" >Check Cached</label>
+                <label class="form-check-label" for="debrid[${index}].check_cached" disabled>Check Cached</label>
             </div>
-            <div class="form-check d-inline-block">
+            <small class="form-text text-muted">Check if the file is cached before downloading(Disabled)</small>
+        </div>
+        <div class="col-md-4">
+            <div class="form-check me-3">
                 <input type="checkbox" class="form-check-input useWebdav" name="debrid[${index}].use_webdav" id="debrid[${index}].use_webdav">
-                <label class="form-check-label" for="debrid[${index}].use_webdav" >Use WebDav</label>
+                <label class="form-check-label" for="debrid[${index}].use_webdav">Enable WebDav Server</label>
             </div>
+             <small class="form-text text-muted">Create an internal webdav for this debrid</small>
         </div>
     </div>
     <div class="row mt-3 webdav d-none">
@@ -350,14 +375,17 @@
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].torrents_refresh_interval">Torrents Refresh Interval</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].torrents_refresh_interval" id="debrid[${index}].torrents_refresh_interval" placeholder="15s" value="15s">
+            <small class="form-text text-muted">How often to refresh the torrents list from debrid(instant when using webdav)</small>
         </div>
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].download_links_refresh_interval">Download Links Refresh Interval</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].download_links_refresh_interval" id="debrid[${index}].download_links_refresh_interval" placeholder="40m" value="40m">
+            <small class="form-text text-muted">How often to refresh the download links list from debrid</small>
         </div>
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].auto_expire_links_after">Expire Links After</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].auto_expire_links_after" id="debrid[${index}].auto_expire_links_after" placeholder="3d" value="3d">
+            <small class="form-text text-muted">How long to keep the links in the webdav before expiring</small>
         </div>
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].folder_naming">Folder Naming Structure</label>
@@ -369,22 +397,27 @@
                 <option value="id">Use ID</option>
                 <option value="infohash">Use Infohash</option>
             </select>
+            <small class="form-text text-muted">How to name each torrent directory in the webdav</small>
         </div>
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].workers">Number of Workers</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].workers" id="debrid[${index}].workers" placeholder="e.g., 50" value="50">
+            <small class="form-text text-muted">Number of workers to use for the webdav server(when refreshing)</small>
         </div>
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].rc_url">Rclone RC URL</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].rc_url" id="debrid[${index}].rc_url" placeholder="e.g., http://localhost:9990">
+            <small class="form-text text-muted">Rclone RC URL for the webdav server(speeds up import significantly)</small>
         </div>
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].rc_user">Rclone RC User</label>
             <input type="text" class="form-control webdav-field" name="debrid[${index}].rc_user" id="debrid[${index}].rc_user">
+            <small class="form-text text-muted">Rclone RC User for the webdav server</small>
         </div>
         <div class="col-md-3 mb-3">
             <label class="form-label" for="debrid[${index}].rc_pass">Rclone RC Password</label>
             <input type="password" class="form-control webdav-field" name="debrid[${index}].rc_pass" id="debrid[${index}].rc_pass">
+            <small class="form-text text-muted">Rclone RC Password for the webdav server</small>
         </div>
     </div>
 </div>
@@ -736,6 +769,7 @@
                 qbittorrent: {
                     download_folder: document.querySelector('[name="qbit.download_folder"]').value,
                     refresh_interval: parseInt(document.querySelector('[name="qbit.refresh_interval"]').value || '0', 10),
+                    max_downloads: parseInt(document.querySelector('[name="qbit.max_downloads"]').value || '0', 5),
                     skip_pre_cache: document.querySelector('[name="qbit.skip_pre_cache"]').checked
                 },
                 arrs: [],

@@ -39,6 +39,7 @@ type QBitTorrent struct {
 	Categories      []string `json:"categories,omitempty"`
 	RefreshInterval int      `json:"refresh_interval,omitempty"`
 	SkipPreCache    bool     `json:"skip_pre_cache,omitempty"`
+	MaxDownloads    int      `json:"max_downloads,omitempty"`
 }
 
 type Arr struct {

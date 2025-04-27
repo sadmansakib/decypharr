@@ -20,6 +20,8 @@ type QBit struct {
 	Tags            []string
 	RefreshInterval int
 	SkipPreCache    bool
+
+	downloadSemaphore chan struct{}
 }
 
 func New() *QBit {
@@ -28,14 +30,15 @@ func New() *QBit {
 	port := cmp.Or(_cfg.Port, os.Getenv("QBIT_PORT"), "8282")
 	refreshInterval := cmp.Or(cfg.RefreshInterval, 10)
 	return &QBit{
-		Username:        cfg.Username,
-		Password:        cfg.Password,
-		Port:            port,
-		DownloadFolder:  cfg.DownloadFolder,
-		Categories:      cfg.Categories,
-		Storage:         NewTorrentStorage(filepath.Join(_cfg.Path, "torrents.json")),
-		logger:          logger.New("qbit"),
-		RefreshInterval: refreshInterval,
-		SkipPreCache:    cfg.SkipPreCache,
+		Username:          cfg.Username,
+		Password:          cfg.Password,
+		Port:              port,
+		DownloadFolder:    cfg.DownloadFolder,
+		Categories:        cfg.Categories,
+		Storage:           NewTorrentStorage(filepath.Join(_cfg.Path, "torrents.json")),
+		logger:            logger.New("qbit"),
+		RefreshInterval:   refreshInterval,
+		SkipPreCache:      cfg.SkipPreCache,
+		downloadSemaphore: make(chan struct{}, cmp.Or(cfg.MaxDownloads, 5)),
 	}
 }

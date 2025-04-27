@@ -354,12 +354,10 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent, isSymlink bool) (*types.Torre
 			break
 		} else if slices.Contains(r.GetDownloadingStatus(), status) {
 			if !t.DownloadUncached {
-				_ = r.DeleteTorrent(t.Id)
 				return t, fmt.Errorf("torrent: %s not cached", t.Name)
 			}
 			return t, nil
 		} else {
-			_ = r.DeleteTorrent(t.Id)
 			return t, fmt.Errorf("torrent: %s has error: %s", t.Name, status)
 		}
 
@@ -482,7 +480,7 @@ func (r *RealDebrid) _getDownloadLink(file *types.File) (*types.DownloadLink, er
 	}
 	var data UnrestrictResponse
 	if err = json.Unmarshal(b, &data); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("realdebrid API error: Error unmarshalling response: %w", err)
 	}
 	if data.Download == "" {
 		return nil, fmt.Errorf("realdebrid API error: download link not found")

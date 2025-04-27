@@ -76,7 +76,12 @@ func ProcessTorrent(d *Engine, magnet *utils.Magnet, a *arr.Arr, isSymlink, over
 		}
 		logger.Info().Msgf("Torrent: %s(id=%s) submitted to %s", dbt.Name, dbt.Id, db.GetName())
 		d.LastUsed = index
-		return db.CheckStatus(dbt, isSymlink)
+		torrent, err := db.CheckStatus(dbt, isSymlink)
+		if err != nil && torrent != nil && torrent.Id != "" {
+			// Delete the torrent if it was not downloaded
+			_ = db.DeleteTorrent(torrent.Id)
+		}
+		return torrent, err
 	}
 	err := fmt.Errorf("failed to process torrent")
 	for _, e := range errs {

@@ -76,6 +76,10 @@ func (q *QBit) ProcessFiles(torrent *Torrent, debridTorrent *debrid.Torrent, arr
 		q.logger.Debug().Msgf("%s <- (%s) Download Progress: %.2f%%", debridTorrent.Debrid, debridTorrent.Name, debridTorrent.Progress)
 		dbT, err := client.CheckStatus(debridTorrent, isSymlink)
 		if err != nil {
+			if dbT != nil && dbT.Id != "" {
+				// Delete the torrent if it was not downloaded
+				_ = client.DeleteTorrent(dbT.Id)
+			}
 			q.logger.Error().Msgf("Error checking status: %v", err)
 			q.MarkAsFailed(torrent)
 			if err := arr.Refresh(); err != nil {

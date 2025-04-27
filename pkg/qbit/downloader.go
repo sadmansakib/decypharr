@@ -66,7 +66,7 @@ func (q *QBit) ProcessManualFile(torrent *Torrent) (string, error) {
 func (q *QBit) downloadFiles(torrent *Torrent, parent string) {
 	debridTorrent := torrent.DebridTorrent
 	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, 5)
+
 	totalSize := int64(0)
 	for _, file := range debridTorrent.Files {
 		totalSize += file.Size
@@ -92,8 +92,8 @@ func (q *QBit) downloadFiles(torrent *Torrent, parent string) {
 		q.UpdateTorrentMin(torrent, debridTorrent)
 	}
 	client := &grab.Client{
-		UserAgent:  "qBitTorrent",
-		HTTPClient: request.New(request.WithTimeout(0)),
+		UserAgent:  "Decypharr[QBitTorrent]",
+		HTTPClient: request.New(request.WithTimeout(60 * time.Second)),
 	}
 	for _, file := range debridTorrent.Files {
 		if file.DownloadLink == nil {
@@ -101,10 +101,10 @@ func (q *QBit) downloadFiles(torrent *Torrent, parent string) {
 			continue
 		}
 		wg.Add(1)
-		semaphore <- struct{}{}
+		q.downloadSemaphore <- struct{}{}
 		go func(file debrid.File) {
 			defer wg.Done()
-			defer func() { <-semaphore }()
+			defer func() { <-q.downloadSemaphore }()
 			filename := file.Link
 
 			err := Download(
