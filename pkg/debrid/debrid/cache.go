@@ -656,7 +656,7 @@ func (c *Cache) validateAndDeleteTorrents(torrents []string) {
 		go func(t string) {
 			defer wg.Done()
 			// Check if torrent is truly deleted
-			if a, err := c.client.GetTorrent(t); err != nil {
+			if _, err := c.client.GetTorrent(t); err != nil {
 				c.deleteTorrent(t, false) // Since it's removed from debrid already
 			} else {
 				c.logger.Trace().Msgf("Torrent %s is still present", t)
