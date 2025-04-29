@@ -319,15 +319,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Handle GET requests for file/directory content
 	if r.Method == "GET" {
-		f, err := h.OpenFile(r.Context(), r.URL.Path, os.O_RDONLY, 0)
+		fRaw, err := h.OpenFile(r.Context(), r.URL.Path, os.O_RDONLY, 0)
 		if err != nil {
-			h.logger.Error().Err(err).Str("path", r.URL.Path).Msg("Failed to open file")
+			h.logger.Error().Err(err).
+				Str("path", r.URL.Path).
+				Msg("Failed to open file")
 			http.NotFound(w, r)
 			return
 		}
-		defer f.Close()
+		defer fRaw.Close()
 
-		fi, err := f.Stat()
+		fi, err := fRaw.Stat()
 		if err != nil {
 			h.logger.Error().Err(err).Msg("Failed to stat file")
 			http.Error(w, "Server Error", http.StatusInternalServerError)
@@ -336,14 +338,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// If the target is a directory, use your directory listing logic.
 		if fi.IsDir() {
-			h.serveDirectory(w, r, f)
+			h.serveDirectory(w, r, fRaw)
 			return
 		}
 
-		rs, ok := f.(io.ReadSeeker)
+		if file, ok := fRaw.(*File); ok {
+			link, err := file.getDownloadLink()
+			if err != nil {
+				h.logger.Error().
+					Err(err).
+					Str("path", r.URL.Path).
+					Msg("Could not fetch download link")
+				http.Error(w, "Could not fetch download link", http.StatusServiceUnavailable)
+				return
+			}
+			if link == "" {
+				http.NotFound(w, r)
+				return
+			}
+			file.downloadLink = link
+		}
+
+		rs, ok := fRaw.(io.ReadSeeker)
 		if !ok {
 			// If not, read the entire file into memory as a fallback.
-			buf, err := io.ReadAll(f)
+			buf, err := io.ReadAll(fRaw)
 			if err != nil {
 				h.logger.Error().Err(err).Msg("Failed to read file content")
 				http.Error(w, "Server Error", http.StatusInternalServerError)
@@ -354,8 +373,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fileName := fi.Name()
 		contentType := getContentType(fileName)
 		w.Header().Set("Content-Type", contentType)
-
-		// Serve the file with the correct modification time.
 		// http.ServeContent automatically handles Range requests.
 		http.ServeContent(w, r, fileName, fi.ModTime(), rs)
 		return
@@ -378,11 +395,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", getContentType(fi.Name()))
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", fi.Size()))
+		w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
+		w.Header().Set("Accept-Ranges", "bytes")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// Fallback: for other methods, use the standard WebDAV handler.
 	handler := &webdav.Handler{
 		FileSystem: h,
 		LockSystem: webdav.NewMemLS(),
