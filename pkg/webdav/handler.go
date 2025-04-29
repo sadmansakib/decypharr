@@ -349,7 +349,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					Err(err).
 					Str("path", r.URL.Path).
 					Msg("Could not fetch download link")
-				http.Error(w, "Could not fetch download link", http.StatusServiceUnavailable)
+				http.Error(w, "Could not fetch download link", http.StatusPreconditionFailed)
 				return
 			}
 			if link == "" {

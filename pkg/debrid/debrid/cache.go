@@ -428,10 +428,10 @@ func (c *Cache) setTorrent(t *CachedTorrent) {
 		// keep the one with the most recent added date
 
 		// Save the most recent torrent
+		mergedFiles := mergeFiles(t, o) // Useful for merging files across multiple torrents, while keeping the most recent
 		if o.AddedOn.After(t.AddedOn) {
 			t = o
 		}
-		mergedFiles := mergeFiles(t, o) // Useful for merging files across multiple torrents, while keeping the most recent
 		t.Files = mergedFiles
 
 	}
@@ -445,10 +445,10 @@ func (c *Cache) setTorrents(torrents map[string]*CachedTorrent) {
 		c.torrents.Store(t.Id, torrentKey)
 		if o, ok := c.torrentsNames.Load(torrentKey); ok && o.Id != t.Id {
 			// Save the most recent torrent
+			mergedFiles := mergeFiles(t, o) // Useful for merging files across multiple torrents, while keeping the most recent
 			if o.AddedOn.After(t.AddedOn) {
 				t = o
 			}
-			mergedFiles := mergeFiles(t, o)
 			t.Files = mergedFiles
 		}
 		c.torrentsNames.Store(torrentKey, t)
