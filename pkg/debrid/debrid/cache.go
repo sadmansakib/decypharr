@@ -320,7 +320,7 @@ func (c *Cache) Sync() error {
 		c.logger.Info().Msgf("Found %d deleted torrents", len(deletedTorrents))
 		for _, id := range deletedTorrents {
 			if _, ok := cachedTorrents[id]; ok {
-				c.validateAndDeleteTorrents(deletedTorrents)
+				c.deleteTorrent(id, false) // delete from cache
 			}
 		}
 	}
@@ -658,8 +658,6 @@ func (c *Cache) validateAndDeleteTorrents(torrents []string) {
 			// Check if torrent is truly deleted
 			if _, err := c.client.GetTorrent(t); err != nil {
 				c.deleteTorrent(t, false) // Since it's removed from debrid already
-			} else {
-				c.logger.Trace().Msgf("Torrent %s is still present", t)
 			}
 		}(torrent)
 	}
