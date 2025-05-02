@@ -93,7 +93,7 @@ func (q *QBit) downloadFiles(torrent *Torrent, parent string) {
 	}
 	client := &grab.Client{
 		UserAgent:  "Decypharr[QBitTorrent]",
-		HTTPClient: request.New(request.WithTimeout(60 * time.Second)),
+		HTTPClient: request.New(request.WithTimeout(0)),
 	}
 	for _, file := range debridTorrent.Files {
 		if file.DownloadLink == nil {
