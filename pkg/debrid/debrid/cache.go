@@ -137,7 +137,7 @@ func New(dc config.Debrid, client types.Client) *Cache {
 			},
 		},
 	}
-	c.listingDebouncer = utils.NewDebouncer[bool](100*time.Millisecond, func(refreshRclone bool) {
+	c.listingDebouncer = utils.NewDebouncer[bool](250*time.Millisecond, func(refreshRclone bool) {
 		c.RefreshListings(refreshRclone)
 	})
 	return c
