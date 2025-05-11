@@ -31,10 +31,6 @@ func (c *Cache) RefreshListings(refreshRclone bool) {
 	// Copy the torrents to a string|time map
 	c.torrents.refreshListing() // refresh torrent listings
 
-	if err := c.refreshParentXml(); err != nil {
-		c.logger.Debug().Err(err).Msg("Failed to refresh XML")
-	}
-
 	if refreshRclone {
 		if err := c.refreshRclone(); err != nil {
 			c.logger.Trace().Err(err).Msg("Failed to refresh rclone") // silent error
@@ -115,7 +111,7 @@ func (c *Cache) refreshTorrents() {
 	close(workChan)
 	wg.Wait()
 
-	c.listingDebouncer.Call(true)
+	c.listingDebouncer.Call(false)
 
 	c.logger.Debug().Msgf("Processed %d new torrents", counter)
 }
@@ -140,13 +136,14 @@ func (c *Cache) refreshRclone() error {
 			MaxIdleConnsPerHost: 5,
 		},
 	}
+	// Create form data
 	data := ""
 	for index, dir := range c.GetDirectories() {
 		if dir != "" {
 			if index == 0 {
 				data += "dir=" + dir
 			} else {
-				data += "&dir" + fmt.Sprint(index) + "=" + dir
+				data += "&dir" + fmt.Sprint(index+1) + "=" + dir
 			}
 		}
 	}
@@ -203,7 +200,7 @@ func (c *Cache) refreshTorrent(torrentId string) *CachedTorrent {
 		IsComplete: len(torrent.Files) > 0,
 	}
 	c.setTorrent(ct, func(torrent *CachedTorrent) {
-		c.listingDebouncer.Call(true)
+		go c.listingDebouncer.Call(true)
 	})
 
 	return ct

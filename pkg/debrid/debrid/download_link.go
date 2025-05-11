@@ -46,7 +46,6 @@ func (c *Cache) GetDownloadLink(torrentName, filename, fileLink string) (string,
 
 	if req, inFlight := c.downloadLinkRequests.Load(fileLink); inFlight {
 		// Wait for the other request to complete and use its result
-		fmt.Println("Waiting for existing request to complete")
 		result := req.(*downloadLinkRequest)
 		return result.Wait()
 	}

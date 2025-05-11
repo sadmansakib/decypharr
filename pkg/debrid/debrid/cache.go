@@ -58,12 +58,6 @@ type RepairRequest struct {
 	FileName  string
 }
 
-type PropfindResponse struct {
-	Data        []byte
-	GzippedData []byte
-	Ts          time.Time
-}
-
 type Cache struct {
 	dir    string
 	client types.Client
@@ -72,7 +66,6 @@ type Cache struct {
 	torrents             *torrentCache
 	downloadLinks        *xsync.Map[string, linkCache]
 	invalidDownloadLinks sync.Map
-	PropfindResp         *xsync.Map[string, PropfindResponse]
 	folderNaming         WebDavFolderNaming
 
 	listingDebouncer *utils.Debouncer[bool]
@@ -134,7 +127,6 @@ func New(dc config.Debrid, client types.Client) *Cache {
 		dir: filepath.Join(cfg.Path, "cache", dc.Name), // path to save cache files
 
 		torrents:                      newTorrentCache(dirFilters),
-		PropfindResp:                  xsync.NewMap[string, PropfindResponse](),
 		client:                        client,
 		logger:                        logger.New(fmt.Sprintf("%s-webdav", client.GetName())),
 		workers:                       dc.Workers,
@@ -338,7 +330,7 @@ func (c *Cache) Sync() error {
 	// Write these torrents to the cache
 	c.setTorrents(cachedTorrents, func() {
 		c.listingDebouncer.Call(false)
-	}) // This is set to false, cos it's likely rclone hs not started yet.
+	}) // Initial calls
 	c.logger.Info().Msgf("Loaded %d torrents from cache", len(cachedTorrents))
 
 	if len(newTorrents) > 0 {
@@ -630,7 +622,9 @@ func (c *Cache) ProcessTorrent(t *types.Torrent) error {
 			IsComplete: len(t.Files) > 0,
 			AddedOn:    addedOn,
 		}
-		c.setTorrent(ct, nil)
+		c.setTorrent(ct, func(tor *CachedTorrent) {
+			c.listingDebouncer.Call(false)
+		})
 	}
 	return nil
 }
@@ -651,7 +645,7 @@ func (c *Cache) AddTorrent(t *types.Torrent) error {
 		AddedOn:    addedOn,
 	}
 	c.setTorrent(ct, func(tor *CachedTorrent) {
-		c.listingDebouncer.Call(true)
+		c.RefreshListings(true)
 	})
 	go c.GenerateDownloadLinks(ct)
 	return nil
@@ -722,7 +716,9 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 				t.Files = newFiles
 				newId = cmp.Or(newId, t.Id)
 				t.Id = newId
-				c.setTorrent(t, nil)
+				c.setTorrent(t, func(tor *CachedTorrent) {
+					c.RefreshListings(false)
+				})
 			}
 		}
 		return true
