@@ -621,9 +621,6 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, 
 		if t.Status != "downloaded" {
 			continue
 		}
-		if _, exists := filenames[t.Filename]; exists {
-			continue
-		}
 		torrents = append(torrents, &types.Torrent{
 			Id:               t.Id,
 			Name:             t.Filename,
@@ -648,32 +645,22 @@ func (r *RealDebrid) GetTorrents() ([]*types.Torrent, error) {
 	limit := 5000
 
 	// Get first batch and total count
-	totalItems, firstBatch, err := r.getTorrents(0, limit)
-	if err != nil {
-		return nil, err
-	}
-
-	allTorrents := firstBatch
-
-	// Calculate remaining requests
-	remaining := totalItems - len(firstBatch)
-	if remaining <= 0 {
-		return allTorrents, nil
-	}
-
-	// Prepare for concurrent fetching
+	allTorrents := make([]*types.Torrent, 0)
 	var fetchError error
-
-	// Calculate how many more requests we need
-	batchCount := (remaining + limit - 1) / limit // ceiling division
-
-	for i := 1; i <= batchCount; i++ {
-		_, batch, err := r.getTorrents(i*limit, limit)
+	offset := 0
+	for {
+		// Fetch next batch of torrents
+		_, torrents, err := r.getTorrents(offset, limit)
 		if err != nil {
 			fetchError = err
-			continue
+			break
 		}
-		allTorrents = append(allTorrents, batch...)
+		totalTorrents := len(torrents)
+		if totalTorrents == 0 {
+			break
+		}
+		allTorrents = append(allTorrents, torrents...)
+		offset += totalTorrents
 	}
 
 	if fetchError != nil {

@@ -41,8 +41,8 @@ type directoryFilter struct {
 
 type torrentCache struct {
 	mu                 sync.RWMutex
-	byID               map[string]string
-	byName             map[string]*CachedTorrent
+	byID               map[string]CachedTorrent
+	byName             map[string]CachedTorrent
 	listing            atomic.Value
 	folderListing      map[string][]os.FileInfo
 	folderListingMu    sync.RWMutex
@@ -59,8 +59,8 @@ type sortableFile struct {
 func newTorrentCache(dirFilters map[string][]directoryFilter) *torrentCache {
 
 	tc := &torrentCache{
-		byID:               make(map[string]string),
-		byName:             make(map[string]*CachedTorrent),
+		byID:               make(map[string]CachedTorrent),
+		byName:             make(map[string]CachedTorrent),
 		folderListing:      make(map[string][]os.FileInfo),
 		directoriesFilters: dirFilters,
 	}
@@ -70,36 +70,36 @@ func newTorrentCache(dirFilters map[string][]directoryFilter) *torrentCache {
 	return tc
 }
 
-func (tc *torrentCache) getByID(id string) (*CachedTorrent, bool) {
+func (tc *torrentCache) getByID(id string) (CachedTorrent, bool) {
 	tc.mu.RLock()
 	defer tc.mu.RUnlock()
 	torrent, exists := tc.byID[id]
-	if !exists {
-		return nil, false
-	}
-	t, ok := tc.byName[torrent]
-	return t, ok
+	return torrent, exists
 }
 
-func (tc *torrentCache) getByIDName(id string) (string, bool) {
-	tc.mu.RLock()
-	defer tc.mu.RUnlock()
-	name, exists := tc.byID[id]
-	return name, exists
-}
-
-func (tc *torrentCache) getByName(name string) (*CachedTorrent, bool) {
+func (tc *torrentCache) getByName(name string) (CachedTorrent, bool) {
 	tc.mu.RLock()
 	defer tc.mu.RUnlock()
 	torrent, exists := tc.byName[name]
 	return torrent, exists
 }
 
-func (tc *torrentCache) set(id, name string, torrent *CachedTorrent) {
+func (tc *torrentCache) set(name string, torrent, newTorrent CachedTorrent) {
+	tc.mu.Lock()
+	// Set the id first
+	tc.byID[newTorrent.Id] = torrent // This is the unadulterated torrent
+	tc.byName[name] = newTorrent     // This is likely the modified torrent
+	tc.mu.Unlock()
+	tc.sortNeeded.Store(true)
+}
+
+func (tc *torrentCache) setMany(torrents map[string]CachedTorrent) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	tc.byID[id] = name
-	tc.byName[name] = torrent
+	for id, torrent := range torrents {
+		tc.byID[id] = torrent
+		tc.byName[torrent.Name] = torrent
+	}
 	tc.sortNeeded.Store(true)
 }
 
@@ -227,10 +227,10 @@ func (tc *torrentCache) torrentMatchDirectory(filters []directoryFilter, file so
 	return true
 }
 
-func (tc *torrentCache) getAll() map[string]*CachedTorrent {
+func (tc *torrentCache) getAll() map[string]CachedTorrent {
 	tc.mu.RLock()
 	defer tc.mu.RUnlock()
-	result := make(map[string]*CachedTorrent)
+	result := make(map[string]CachedTorrent)
 	for name, torrent := range tc.byName {
 		result[name] = torrent
 	}
@@ -247,12 +247,12 @@ func (tc *torrentCache) getAllIDs() []string {
 	return ids
 }
 
-func (tc *torrentCache) getIdMaps() map[string]string {
+func (tc *torrentCache) getIdMaps() map[string]struct{} {
 	tc.mu.RLock()
 	defer tc.mu.RUnlock()
-	res := make(map[string]string)
-	for id, name := range tc.byID {
-		res[id] = name
+	res := make(map[string]struct{}, len(tc.byID))
+	for id, _ := range tc.byID {
+		res[id] = struct{}{}
 	}
 	return res
 }

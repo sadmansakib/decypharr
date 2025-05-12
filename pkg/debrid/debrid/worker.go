@@ -17,13 +17,13 @@ func (c *Cache) StartSchedule() error {
 		c.logger.Trace().Msgf("Next download link refresh job: %s", t.Format("2006-01-02 15:04:05"))
 	}
 
-	//torrentJob, err := utils.ScheduleJob(ctx, c.torrentRefreshInterval, nil, c.refreshTorrents)
-	//if err != nil {
-	//	c.logger.Error().Err(err).Msg("Failed to add torrent refresh job")
-	//}
-	//if t, err := torrentJob.NextRun(); err == nil {
-	//	c.logger.Trace().Msgf("Next torrent refresh job: %s", t.Format("2006-01-02 15:04:05"))
-	//}
+	torrentJob, err := utils.ScheduleJob(ctx, c.torrentRefreshInterval, nil, c.refreshTorrents)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("Failed to add torrent refresh job")
+	}
+	if t, err := torrentJob.NextRun(); err == nil {
+		c.logger.Trace().Msgf("Next torrent refresh job: %s", t.Format("2006-01-02 15:04:05"))
+	}
 
 	// Schedule the reset invalid links job
 	// This job will run every 24 hours

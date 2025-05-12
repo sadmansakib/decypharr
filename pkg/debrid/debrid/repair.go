@@ -194,14 +194,16 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 		}
 	}
 	// Set torrent to newTorrent
-	ct = &CachedTorrent{
+	newCt := CachedTorrent{
 		Torrent:    newTorrent,
 		AddedOn:    addedOn,
 		IsComplete: len(newTorrent.Files) > 0,
 	}
-	c.setTorrent(ct, func(torrent *CachedTorrent) {
+	c.setTorrent(newCt, func(torrent CachedTorrent) {
 		c.listingDebouncer.Call(true)
 	})
+
+	ct = &newCt // Update ct to point to the new torrent
 
 	// We can safely delete the old torrent here
 	if oldID != "" {

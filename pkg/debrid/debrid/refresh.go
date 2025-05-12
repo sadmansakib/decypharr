@@ -70,8 +70,9 @@ func (c *Cache) refreshTorrents() {
 		}
 	}
 
-	// Validate the torrents are truly deleted, then remove them from the cache too
-	go c.validateAndDeleteTorrents(deletedTorrents)
+	if len(deletedTorrents) > 0 {
+		go c.validateAndDeleteTorrents(deletedTorrents)
+	}
 
 	newTorrents := make([]*types.Torrent, 0)
 	cachedIdsMaps := c.torrents.getIdMaps()
@@ -84,6 +85,8 @@ func (c *Cache) refreshTorrents() {
 	if len(newTorrents) == 0 {
 		return
 	}
+
+	c.logger.Trace().Msgf("Found %d new torrents", len(newTorrents))
 
 	workChan := make(chan *types.Torrent, min(100, len(newTorrents)))
 	errChan := make(chan error, len(newTorrents))
@@ -200,16 +203,16 @@ func (c *Cache) refreshTorrent(torrentId string) *CachedTorrent {
 	if err != nil {
 		addedOn = time.Now()
 	}
-	ct := &CachedTorrent{
+	ct := CachedTorrent{
 		Torrent:    torrent,
 		AddedOn:    addedOn,
 		IsComplete: len(torrent.Files) > 0,
 	}
-	c.setTorrent(ct, func(torrent *CachedTorrent) {
+	c.setTorrent(ct, func(torrent CachedTorrent) {
 		go c.listingDebouncer.Call(true)
 	})
 
-	return ct
+	return &ct
 }
 
 func (c *Cache) refreshDownloadLinks() {

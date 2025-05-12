@@ -125,7 +125,7 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (strin
 	return downloadLink.DownloadLink, nil
 }
 
-func (c *Cache) GenerateDownloadLinks(t *CachedTorrent) {
+func (c *Cache) GenerateDownloadLinks(t CachedTorrent) {
 	if err := c.client.GenerateDownloadLinks(t.Torrent); err != nil {
 		c.logger.Error().Err(err).Msg("Failed to generate download links")
 		return
