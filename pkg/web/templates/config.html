@@ -283,13 +283,6 @@
                                 </div>
                                 <div class="col-md-3 mb-3">
                                     <div class="form-check">
-                                        <input type="checkbox" class="form-check-input" name="repair.reinsert" id="repair.reinsert">
-                                        <label class="form-check-label" for="repair.reinsert">Re-Insert Nerfed Release</label>
-                                    </div>
-                                    <small class="form-text text-muted">Tries to autofix broken releases by re-inserting the torrent</small>
-                                </div>
-                                <div class="col-md-3 mb-3">
-                                    <div class="form-check">
                                         <input type="checkbox" class="form-check-input" name="repair.auto_process" id="repair.auto_process">
                                         <label class="form-check-label" for="repair.auto_process">Auto Process</label>
                                     </div>
@@ -1063,7 +1056,6 @@
                     enabled: document.querySelector('[name="repair.enabled"]').checked,
                     interval: document.querySelector('[name="repair.interval"]').value,
                     run_on_start: document.querySelector('[name="repair.run_on_start"]').checked,
-                    reinsert: document.querySelector('[name="repair.reinsert"]').checked,
                     zurg_url: document.querySelector('[name="repair.zurg_url"]').value,
                     use_webdav: document.querySelector('[name="repair.use_webdav"]').checked,
                     auto_process: document.querySelector('[name="repair.auto_process"]').checked

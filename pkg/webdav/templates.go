@@ -103,6 +103,19 @@ const directoryTemplate = `
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        .disabled {
+            color: #999;
+            pointer-events: none;
+            border-color: #f0f0f0;
+            background-color: #f8f8f8;
+            cursor: not-allowed;
+        }
+        .disabled .file-number {
+            color: #bbb;
+        }
+        .disabled .file-info {
+            color: #aaa;
+        }
     </style>
 </head>
 <body>
@@ -111,9 +124,14 @@ const directoryTemplate = `
         {{if .ShowParent}}
             <li><a href="{{urlpath .ParentPath}}" class="parent-dir"><span class="file-number"></span>Parent Directory</a></li>
         {{end}}
+        {{$isBadPath := hasSuffix .Path "__bad__"}}
         {{range $index, $file := .Children}}
             <li>
-                <a href="{{urlpath (printf "%s/%s" $.Path $file.Name)}}">
+                {{if $isBadPath}}
+                    <a class="disabled">
+                {{else}}
+                    <a href="{{urlpath (printf "%s/%s" $.Path $file.Name)}}">
+                {{end}}
                     <span class="file-number">{{add $index 1}}.</span>
                     <span class="file-name">{{$file.Name}}{{if $file.IsDir}}/{{end}}</span>
                     <span class="file-info">

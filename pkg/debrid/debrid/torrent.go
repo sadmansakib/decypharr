@@ -1,6 +1,7 @@
 package debrid
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"sort"
@@ -51,9 +52,11 @@ type torrentCache struct {
 }
 
 type sortableFile struct {
+	id      string
 	name    string
 	modTime time.Time
 	size    int64
+	bad     bool
 }
 
 func newTorrentCache(dirFilters map[string][]directoryFilter) *torrentCache {
@@ -132,7 +135,7 @@ func (tc *torrentCache) refreshListing() {
 	tc.mu.Lock()
 	all := make([]sortableFile, 0, len(tc.byName))
 	for name, t := range tc.byName {
-		all = append(all, sortableFile{name, t.AddedOn, t.Size})
+		all = append(all, sortableFile{t.Id, name, t.AddedOn, t.Size, t.Bad})
 	}
 	tc.sortNeeded.Store(false)
 	tc.mu.Unlock()
@@ -155,6 +158,30 @@ func (tc *torrentCache) refreshListing() {
 		tc.listing.Store(listing)
 	}()
 	wg.Done()
+
+	wg.Add(1)
+	// For __bad__
+	go func() {
+		listing := make([]os.FileInfo, 0)
+		for _, sf := range all {
+			if sf.bad {
+				listing = append(listing, &fileInfo{
+					name:    fmt.Sprintf("%s(%s)", sf.name, sf.id),
+					size:    sf.size,
+					mode:    0755 | os.ModeDir,
+					modTime: sf.modTime,
+					isDir:   true,
+				})
+			}
+		}
+		tc.folderListingMu.Lock()
+		if len(listing) > 0 {
+			tc.folderListing["__bad__"] = listing
+		} else {
+			delete(tc.folderListing, "__bad__")
+		}
+		tc.folderListingMu.Unlock()
+	}()
 
 	now := time.Now()
 	wg.Add(len(tc.directoriesFilters)) // for each directory filter

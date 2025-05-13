@@ -83,7 +83,7 @@ func (h *Handler) getTorrentsFolders(folder string) []os.FileInfo {
 }
 
 func (h *Handler) getParentItems() []string {
-	parents := []string{"__all__", "torrents"}
+	parents := []string{"__all__", "torrents", "__bad__"}
 
 	// Add custom folders
 	parents = append(parents, h.cache.GetCustomFolders()...)
@@ -122,7 +122,7 @@ func (h *Handler) getChildren(name string) []os.FileInfo {
 	name = utils.PathUnescape(path.Clean(name))
 	root := path.Clean(h.getRootPath())
 
-	// top‐level “parents” (e.g. __all__, torrents)
+	// top‐level “parents” (e.g. __all__, torrents etc)
 	if name == root {
 		return h.getParentFiles()
 	}
@@ -397,6 +397,7 @@ func (h *Handler) serveDirectory(w http.ResponseWriter, r *http.Request, file we
 			}
 			return fmt.Sprintf("%.2f %s", size, unit)
 		},
+		"hasSuffix": strings.HasSuffix,
 	}
 	tmpl, err := template.New("directory").Funcs(funcMap).Parse(directoryTemplate)
 	if err != nil {
@@ -443,7 +444,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 	if file, ok := fRaw.(*File); ok && file.content == nil {
 		link, err := file.getDownloadLink()
 		if err != nil {
-			h.logger.Trace().
+			h.logger.Error().
 				Err(err).
 				Str("path", r.URL.Path).
 				Msg("Could not fetch download link")

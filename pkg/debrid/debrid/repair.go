@@ -3,7 +3,6 @@ package debrid
 import (
 	"errors"
 	"fmt"
-	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
@@ -32,6 +31,25 @@ func (r *reInsertRequest) Complete(result *CachedTorrent, err error) {
 func (r *reInsertRequest) Wait() (*CachedTorrent, error) {
 	<-r.done
 	return r.result, r.err
+}
+
+func (c *Cache) markAsFailedToReinsert(torrentId string) {
+	currentCount := 0
+	if retryCount, ok := c.failedToReinsert.Load(torrentId); ok {
+		currentCount = retryCount.(int)
+	}
+
+	c.failedToReinsert.Store(torrentId, currentCount+1)
+
+	// Remove the torrent from the directory if it has failed to reinsert, max retries are hardcoded to 5
+	if currentCount > 3 {
+		// Mark torrent as failed
+		if torrent, ok := c.torrents.getByID(torrentId); ok {
+			torrent.Bad = true
+			c.SaveTorrent(torrent)
+		}
+	}
+
 }
 
 func (c *Cache) IsTorrentBroken(t *CachedTorrent, filenames []string) bool {
@@ -85,9 +103,8 @@ func (c *Cache) IsTorrentBroken(t *CachedTorrent, filenames []string) bool {
 			}
 		}
 	}
-	cfg := config.Get()
 	// Try to reinsert the torrent if it's broken
-	if cfg.Repair.ReInsert && isBroken && t.Torrent != nil {
+	if isBroken && t.Torrent != nil {
 		// Check if the torrent is already in progress
 		if _, err := c.reInsertTorrent(t); err != nil {
 			c.logger.Error().Err(err).Str("torrentId", t.Torrent.Id).Msg("Failed to reinsert torrent")
@@ -161,14 +178,14 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	var err error
 	newTorrent, err = c.client.SubmitMagnet(newTorrent)
 	if err != nil {
-		c.failedToReinsert.Store(oldID, struct{}{})
+		c.markAsFailedToReinsert(oldID)
 		// Remove the old torrent from the cache and debrid service
 		return ct, fmt.Errorf("failed to submit magnet: %w", err)
 	}
 
 	// Check if the torrent was submitted
 	if newTorrent == nil || newTorrent.Id == "" {
-		c.failedToReinsert.Store(oldID, struct{}{})
+		c.markAsFailedToReinsert(oldID)
 		return ct, fmt.Errorf("failed to submit magnet: empty torrent")
 	}
 	newTorrent.DownloadUncached = false // Set to false, avoid re-downloading
@@ -178,7 +195,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 			// Delete the torrent if it was not downloaded
 			_ = c.client.DeleteTorrent(newTorrent.Id)
 		}
-		c.failedToReinsert.Store(oldID, struct{}{})
+		c.markAsFailedToReinsert(oldID)
 		return ct, err
 	}
 
@@ -189,7 +206,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	}
 	for _, f := range newTorrent.Files {
 		if f.Link == "" {
-			c.failedToReinsert.Store(oldID, struct{}{})
+			c.markAsFailedToReinsert(oldID)
 			return ct, fmt.Errorf("failed to reinsert torrent: empty link")
 		}
 	}

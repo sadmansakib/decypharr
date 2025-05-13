@@ -41,6 +41,7 @@ type CachedTorrent struct {
 	*types.Torrent
 	AddedOn    time.Time `json:"added_on"`
 	IsComplete bool      `json:"is_complete"`
+	Bad        bool      `json:"bad"`
 }
 
 func (c CachedTorrent) copy() CachedTorrent {
@@ -285,7 +286,11 @@ func (c *Cache) load() (map[string]CachedTorrent, error) {
 }
 
 func (c *Cache) Sync() error {
-	defer c.logger.Info().Msg("WebDav server sync complete")
+	cfg := config.Get()
+	name := c.client.GetName()
+	addr := cfg.BindAddress + ":" + cfg.Port + cfg.URLBase + "webdav/" + name + "/"
+
+	defer c.logger.Info().Msgf("%s WebDav server running at %s", name, addr)
 	cachedTorrents, err := c.load()
 	if err != nil {
 		c.logger.Error().Err(err).Msg("Failed to load cache")
@@ -298,7 +303,7 @@ func (c *Cache) Sync() error {
 
 	totalTorrents := len(torrents)
 
-	c.logger.Info().Msgf("Got %d torrents from %s", totalTorrents, c.client.GetName())
+	c.logger.Info().Msgf("%d torrents found from %s", totalTorrents, c.client.GetName())
 
 	newTorrents := make([]*types.Torrent, 0)
 	idStore := make(map[string]struct{}, totalTorrents)
@@ -473,12 +478,6 @@ func (c *Cache) GetListing(folder string) []os.FileInfo {
 
 func (c *Cache) GetCustomFolders() []string {
 	return c.customFolders
-}
-
-func (c *Cache) GetDirectories() []string {
-	dirs := []string{"__all__", "torrents"}
-	dirs = append(dirs, c.customFolders...)
-	return dirs
 }
 
 func (c *Cache) Close() error {
@@ -711,9 +710,7 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 				t.Files = newFiles
 				newId = cmp.Or(newId, t.Id)
 				t.Id = newId
-				c.setTorrent(t, func(tor CachedTorrent) {
-					c.RefreshListings(false)
-				})
+				c.setTorrent(t, nil) // This gets called after calling deleteTorrent
 			}
 		}
 		return true
