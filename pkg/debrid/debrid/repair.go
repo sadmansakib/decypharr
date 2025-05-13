@@ -39,7 +39,9 @@ func (c *Cache) markAsFailedToReinsert(torrentId string) {
 	// Remove the torrent from the directory if it has failed to reinsert, max retries are hardcoded to 5
 	if torrent, ok := c.torrents.getByID(torrentId); ok {
 		torrent.Bad = true
-		c.SaveTorrent(torrent)
+		c.setTorrent(torrent, func(torrent CachedTorrent) {
+			c.listingDebouncer.Call(false)
+		})
 	}
 }
 
@@ -50,7 +52,9 @@ func (c *Cache) markAsSuccessfullyReinserted(torrentId string) {
 	c.failedToReinsert.Delete(torrentId)
 	if torrent, ok := c.torrents.getByID(torrentId); ok {
 		torrent.Bad = false
-		c.SaveTorrent(torrent)
+		c.setTorrent(torrent, func(torrent CachedTorrent) {
+			c.listingDebouncer.Call(false)
+		})
 	}
 }
 

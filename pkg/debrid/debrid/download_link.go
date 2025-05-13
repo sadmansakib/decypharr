@@ -136,7 +136,7 @@ func (c *Cache) GenerateDownloadLinks(t CachedTorrent) {
 		}
 
 	}
-	c.SaveTorrent(t)
+	c.setTorrent(t, nil)
 }
 
 func (c *Cache) updateDownloadLink(dl *types.DownloadLink) {
