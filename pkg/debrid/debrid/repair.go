@@ -223,7 +223,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 		IsComplete: len(newTorrent.Files) > 0,
 	}
 	c.setTorrent(newCt, func(torrent CachedTorrent) {
-		c.listingDebouncer.Call(true)
+		c.RefreshListings(true)
 	})
 
 	ct = &newCt // Update ct to point to the new torrent

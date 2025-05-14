@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/puzpuzpuz/xsync/v4"
 	"os"
 	"path"
 	"path/filepath"
@@ -73,7 +72,7 @@ type Cache struct {
 	logger zerolog.Logger
 
 	torrents             *torrentCache
-	downloadLinks        *xsync.Map[string, linkCache]
+	downloadLinks        *downloadLinkCache
 	invalidDownloadLinks sync.Map
 	folderNaming         WebDavFolderNaming
 
@@ -139,7 +138,7 @@ func New(dc config.Debrid, client types.Client) *Cache {
 		client:                        client,
 		logger:                        logger.New(fmt.Sprintf("%s-webdav", client.GetName())),
 		workers:                       dc.Workers,
-		downloadLinks:                 xsync.NewMap[string, linkCache](),
+		downloadLinks:                 newDownloadLinkCache(),
 		torrentRefreshInterval:        dc.TorrentsRefreshInterval,
 		downloadLinksRefreshInterval:  dc.DownloadLinksRefreshInterval,
 		folderNaming:                  WebDavFolderNaming(dc.FolderNaming),
@@ -151,7 +150,7 @@ func New(dc config.Debrid, client types.Client) *Cache {
 		config:        dc,
 		customFolders: customFolders,
 	}
-	c.listingDebouncer = utils.NewDebouncer[bool](250*time.Millisecond, func(refreshRclone bool) {
+	c.listingDebouncer = utils.NewDebouncer[bool](100*time.Millisecond, func(refreshRclone bool) {
 		c.RefreshListings(refreshRclone)
 	})
 	return c

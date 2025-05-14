@@ -118,7 +118,7 @@ func (a *Arr) Validate() error {
 
 type Storage struct {
 	Arrs   map[string]*Arr // name -> arr
-	mu     sync.RWMutex
+	mu     sync.Mutex
 	logger zerolog.Logger
 }
 
@@ -159,14 +159,14 @@ func (as *Storage) AddOrUpdate(arr *Arr) {
 }
 
 func (as *Storage) Get(name string) *Arr {
-	as.mu.RLock()
-	defer as.mu.RUnlock()
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	return as.Arrs[name]
 }
 
 func (as *Storage) GetAll() []*Arr {
-	as.mu.RLock()
-	defer as.mu.RUnlock()
+	as.mu.Lock()
+	defer as.mu.Unlock()
 	arrs := make([]*Arr, 0, len(as.Arrs))
 	for _, arr := range as.Arrs {
 		if arr.Host != "" && arr.Token != "" {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"sync"
 	"time"
 )
 
@@ -13,6 +14,33 @@ type linkCache struct {
 	link      string
 	accountId string
 	expiresAt time.Time
+}
+
+type downloadLinkCache struct {
+	data map[string]linkCache
+	mu   sync.Mutex
+}
+
+func newDownloadLinkCache() *downloadLinkCache {
+	return &downloadLinkCache{
+		data: make(map[string]linkCache),
+	}
+}
+func (c *downloadLinkCache) Load(key string) (linkCache, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dl, ok := c.data[key]
+	return dl, ok
+}
+func (c *downloadLinkCache) Store(key string, value linkCache) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data[key] = value
+}
+func (c *downloadLinkCache) Delete(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.data, key)
 }
 
 type downloadLinkRequest struct {
