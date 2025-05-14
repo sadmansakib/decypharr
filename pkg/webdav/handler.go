@@ -75,7 +75,7 @@ func (h *Handler) Rename(ctx context.Context, oldName, newName string) error {
 }
 
 func (h *Handler) getRootPath() string {
-	return fmt.Sprintf(filepath.Join(string(os.PathSeparator), "webdav", "%s"), h.Name)
+	return fmt.Sprintf(path.Join("/", "webdav", "%s"), h.Name)
 }
 
 func (h *Handler) getTorrentsFolders(folder string) []os.FileInfo {
@@ -131,8 +131,8 @@ func (h *Handler) getChildren(name string) []os.FileInfo {
 		return h.getTorrentsFolders(parent)
 	}
 	// torrent-folder level (e.g. /root/parentFolder/torrentName)
-	rel := strings.TrimPrefix(name, root+string(os.PathSeparator))
-	parts := strings.Split(rel, string(os.PathSeparator))
+	rel := strings.TrimPrefix(name, root+"/")
+	parts := strings.Split(rel, "/")
 	if len(parts) == 2 && utils.Contains(h.getParentItems(), parts[0]) {
 		torrentName := parts[1]
 		if t := h.cache.GetTorrentByName(torrentName); t != nil {
@@ -152,7 +152,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 	now := time.Now()
 
 	// 1) special case version.txt
-	if name == filepath.Join(rootDir, "version.txt") {
+	if name == path.Join(rootDir, "version.txt") {
 		versionInfo := version.GetInfo().String()
 		return &File{
 			cache:        h.cache,
@@ -167,7 +167,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 
 	// 2) directory case: ask getChildren
 	if children := h.getChildren(name); children != nil {
-		displayName := path.Base(name)
+		displayName := filepath.Clean(path.Base(name))
 		if name == rootDir {
 			displayName = string(os.PathSeparator)
 		}
@@ -184,14 +184,14 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 
 	// 3) file‐within‐torrent case
 	// everything else must be a file under a torrent folder
-	rel := strings.TrimPrefix(name, rootDir+string(os.PathSeparator))
-	parts := strings.Split(rel, string(os.PathSeparator))
+	rel := strings.TrimPrefix(name, rootDir+"/")
+	parts := strings.Split(rel, "/")
 	if len(parts) >= 2 {
 		if utils.Contains(h.getParentItems(), parts[0]) {
 			torrentName := parts[1]
 			cached := h.cache.GetTorrentByName(torrentName)
 			if cached != nil && len(parts) >= 3 {
-				filename := filepath.Join(parts[2:]...)
+				filename := filepath.Clean(path.Join(parts[2:]...))
 				if file, ok := cached.Files[filename]; ok {
 					return &File{
 						cache:        h.cache,
