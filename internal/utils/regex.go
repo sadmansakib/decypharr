@@ -13,8 +13,6 @@ var (
 )
 
 var (
-	videoRegex  = regexp.MustCompile(videoMatch)
-	musicRegex  = regexp.MustCompile(musicMatch)
 	mediaRegex  = regexp.MustCompile(videoMatch + "|" + musicMatch)
 	sampleRegex = regexp.MustCompile(sampleMatch)
 )

@@ -22,7 +22,6 @@ type AllDebrid struct {
 	Host             string `json:"host"`
 	APIKey           string
 	accounts         map[string]types.Account
-	accountsMu       sync.RWMutex
 	DownloadUncached bool
 	client           *request.Client
 

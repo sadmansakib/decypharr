@@ -2,27 +2,90 @@ package webdav
 
 import (
 	"context"
+	"embed"
 	"fmt"
 	"github.com/go-chi/chi/v5"
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/service"
 	"html/template"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
+)
+
+//go:embed templates/*
+var templatesFS embed.FS
+
+var (
+	funcMap = template.FuncMap{
+		"add": func(a, b int) int {
+			return a + b
+		},
+		"urlpath": func(p string) string {
+			segments := strings.Split(p, "/")
+			for i, segment := range segments {
+				segments[i] = url.PathEscape(segment)
+			}
+			return strings.Join(segments, "/")
+		},
+		"formatSize": func(bytes int64) string {
+			const (
+				KB = 1024
+				MB = 1024 * KB
+				GB = 1024 * MB
+				TB = 1024 * GB
+			)
+
+			var size float64
+			var unit string
+
+			switch {
+			case bytes >= TB:
+				size = float64(bytes) / TB
+				unit = "TB"
+			case bytes >= GB:
+				size = float64(bytes) / GB
+				unit = "GB"
+			case bytes >= MB:
+				size = float64(bytes) / MB
+				unit = "MB"
+			case bytes >= KB:
+				size = float64(bytes) / KB
+				unit = "KB"
+			default:
+				size = float64(bytes)
+				unit = "bytes"
+			}
+
+			// Format to 2 decimal places for larger units, no decimals for bytes
+			if unit == "bytes" {
+				return fmt.Sprintf("%.0f %s", size, unit)
+			}
+			return fmt.Sprintf("%.2f %s", size, unit)
+		},
+		"hasSuffix": strings.HasSuffix,
+	}
+	tplRoot      = template.Must(template.ParseFS(templatesFS, "templates/root.html"))
+	tplDirectory = template.Must(template.New("").Funcs(funcMap).ParseFS(templatesFS, "templates/directory.html"))
 )
 
 type WebDav struct {
 	Handlers []*Handler
 	ready    chan struct{}
+	URLBase  string
 }
 
 func New() *WebDav {
 	svc := service.GetService()
+	urlBase := config.Get().URLBase
 	w := &WebDav{
 		Handlers: make([]*Handler, 0),
 		ready:    make(chan struct{}),
+		URLBase:  urlBase,
 	}
 	for name, c := range svc.Debrid.Caches {
-		h := NewHandler(name, c, c.GetLogger())
+		h := NewHandler(name, urlBase, c, c.GetLogger())
 		w.Handlers = append(w.Handlers, h)
 	}
 	return w
@@ -103,7 +166,7 @@ func (wd *WebDav) Start(ctx context.Context) error {
 
 func (wd *WebDav) mountHandlers(r chi.Router) {
 	for _, h := range wd.Handlers {
-		r.Mount(h.RootPath, h)
+		r.Mount("/"+h.Name, h) // Mount to /name since router is already prefixed with /webdav
 	}
 }
 
@@ -127,20 +190,14 @@ func (wd *WebDav) handleRoot() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-		tmpl, err := template.New("root").Parse(rootTemplate)
-		if err != nil {
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			return
-		}
-
 		data := struct {
 			Handlers []*Handler
-			Prefix   string
+			URLBase  string
 		}{
 			Handlers: wd.Handlers,
-			Prefix:   "/webdav",
+			URLBase:  wd.URLBase,
 		}
-		if err := tmpl.Execute(w, data); err != nil {
+		if err := tplRoot.Execute(w, data); err != nil {
 			return
 		}
 	}

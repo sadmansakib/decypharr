@@ -145,32 +145,32 @@
         <div class="collapse navbar-collapse" id="navbarNav">
             <ul class="navbar-nav me-auto">
                 <li class="nav-item">
-                    <a class="nav-link {{if eq .Page "index"}}active{{end}}" href="/">
+                    <a class="nav-link {{if eq .Page "index"}}active{{end}}" href="{{.URLBase}}">
                     <i class="bi bi-table me-1"></i>Torrents
                     </a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link {{if eq .Page "download"}}active{{end}}" href="/download">
+                    <a class="nav-link {{if eq .Page "download"}}active{{end}}" href="{{.URLBase}}download">
                     <i class="bi bi-cloud-download me-1"></i>Download
                     </a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link {{if eq .Page "repair"}}active{{end}}" href="/repair">
+                    <a class="nav-link {{if eq .Page "repair"}}active{{end}}" href="{{.URLBase}}repair">
                     <i class="bi bi-tools me-1"></i>Repair
                     </a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link {{if eq .Page "config"}}active{{end}}" href="/config">
+                    <a class="nav-link {{if eq .Page "config"}}active{{end}}" href="{{.URLBase}}config">
                     <i class="bi bi-gear me-1"></i>Settings
                     </a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link" href="/webdav" target="_blank">
+                    <a class="nav-link" href="{{.URLBase}}webdav" target="_blank">
                         <i class="bi bi-cloud me-1"></i>WebDAV
                     </a>
                 </li>
                 <li class="nav-item">
-                    <a class="nav-link" href="/logs" target="_blank">
+                    <a class="nav-link" href="{{.URLBase}}logs" target="_blank">
                         <i class="bi bi-journal me-1"></i>Logs
                     </a>
                 </li>
@@ -209,23 +209,15 @@
 
     window.urlBase = "{{.URLBase}}";
 
-    function joinUrl (base, path) {
-        if (path.substring(0, 1) === "/") {
-            // path starts with `/`. Thus it is absolute.
-            return path;
-        }
-        if (base.substring(base.length-1) === "/") {
-            // base ends with `/`
-            return base + path;
-        }
-        return base + "/" + path;
+    function joinURL(...segments) {
+        return segments.join('/').replace(/[/]+/g, '/').replace(/^(.+):\//, '$1://').replace(/^file:/, 'file:/').replace(/\/(?=[?&#])/g, '').replace(/\?/g, '&');
     }
 
     function fetcher(endpoint, options = {}) {
         // Use the global urlBase or default to empty string
         let baseUrl = window.urlBase || '';
 
-        let url = joinUrl(baseUrl, endpoint);
+        let url = joinURL(baseUrl, endpoint);
 
         // Return the regular fetcher with the complete URL
         return fetch(url, options);

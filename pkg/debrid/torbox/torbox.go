@@ -28,7 +28,6 @@ type Torbox struct {
 	Host             string `json:"host"`
 	APIKey           string
 	accounts         map[string]types.Account
-	accountsMutex    sync.RWMutex
 	DownloadUncached bool
 	client           *request.Client
 

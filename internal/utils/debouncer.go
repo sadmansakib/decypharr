@@ -10,7 +10,6 @@ type Debouncer[T any] struct {
 	timer    *time.Timer
 	interval time.Duration
 	caller   func(arg T)
-	arg      T
 }
 
 func NewDebouncer[T any](interval time.Duration, caller func(arg T)) *Debouncer[T] {

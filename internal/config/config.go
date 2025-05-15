@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -327,8 +328,11 @@ func (c *Config) setDefaults() {
 		c.URLBase = "/"
 	}
 	// validate url base starts with /
-	if c.URLBase[0] != '/' {
+	if !strings.HasPrefix(c.URLBase, "/") {
 		c.URLBase = "/" + c.URLBase
+	}
+	if !strings.HasSuffix(c.URLBase, "/") {
+		c.URLBase += "/"
 	}
 
 	// Load the auth file

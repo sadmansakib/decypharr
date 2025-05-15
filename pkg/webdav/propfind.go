@@ -13,7 +13,11 @@ import (
 )
 
 var builderPool = sync.Pool{
-	New: func() interface{} { return stringbuf.New("") },
+
+	New: func() interface{} {
+		buf := stringbuf.New("")
+		return buf
+	},
 }
 
 func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) {
@@ -21,17 +25,10 @@ func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), "metadataOnly", true)
 	r = r.WithContext(ctx)
 
-	// Determine depth (default "1")
-	depth := r.Header.Get("Depth")
-	if depth == "" {
-		depth = "1"
-	}
-
 	cleanPath := path.Clean(r.URL.Path)
 
 	// Build the list of entries
 	type entry struct {
-		href    string
 		escHref string // already XML-safe + percent-escaped
 		escName string
 		size    int64

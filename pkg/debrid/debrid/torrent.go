@@ -96,16 +96,6 @@ func (tc *torrentCache) set(name string, torrent, newTorrent CachedTorrent) {
 	tc.sortNeeded.Store(true)
 }
 
-func (tc *torrentCache) setMany(torrents map[string]CachedTorrent) {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	for id, torrent := range torrents {
-		tc.byID[id] = torrent
-		tc.byName[torrent.Name] = torrent
-	}
-	tc.sortNeeded.Store(true)
-}
-
 func (tc *torrentCache) getListing() []os.FileInfo {
 	// Fast path: if we have a sorted list and no changes since last sort
 	if !tc.sortNeeded.Load() {
@@ -135,7 +125,7 @@ func (tc *torrentCache) refreshListing() {
 	tc.mu.Lock()
 	all := make([]sortableFile, 0, len(tc.byName))
 	for name, t := range tc.byName {
-		all = append(all, sortableFile{t.Id, name, t.AddedOn, t.Size, t.Bad})
+		all = append(all, sortableFile{t.Id, name, t.AddedOn, t.Bytes, t.Bad})
 	}
 	tc.sortNeeded.Store(false)
 	tc.mu.Unlock()
@@ -279,7 +269,7 @@ func (tc *torrentCache) getIdMaps() map[string]struct{} {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	res := make(map[string]struct{}, len(tc.byID))
-	for id, _ := range tc.byID {
+	for id := range tc.byID {
 		res[id] = struct{}{}
 	}
 	return res

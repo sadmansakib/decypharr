@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"html/template"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,15 +25,17 @@ type Handler struct {
 	Name     string
 	logger   zerolog.Logger
 	cache    *debrid.Cache
+	URLBase  string
 	RootPath string
 }
 
-func NewHandler(name string, cache *debrid.Cache, logger zerolog.Logger) *Handler {
+func NewHandler(name, urlBase string, cache *debrid.Cache, logger zerolog.Logger) *Handler {
 	h := &Handler{
 		Name:     name,
 		cache:    cache,
 		logger:   logger,
-		RootPath: fmt.Sprintf("/%s", name),
+		URLBase:  urlBase,
+		RootPath: path.Join(urlBase, "webdav", name),
 	}
 	return h
 }
@@ -52,7 +52,7 @@ func (h *Handler) RemoveAll(ctx context.Context, name string) error {
 	}
 	name = path.Clean(name)
 
-	rootDir := path.Clean(h.getRootPath())
+	rootDir := path.Clean(h.RootPath)
 
 	if name == rootDir {
 		return os.ErrPermission
@@ -72,10 +72,6 @@ func (h *Handler) RemoveAll(ctx context.Context, name string) error {
 // Rename implements webdav.FileSystem
 func (h *Handler) Rename(ctx context.Context, oldName, newName string) error {
 	return os.ErrPermission // Read-only filesystem
-}
-
-func (h *Handler) getRootPath() string {
-	return fmt.Sprintf(path.Join("/", "webdav", "%s"), h.Name)
 }
 
 func (h *Handler) getTorrentsFolders(folder string) []os.FileInfo {
@@ -120,7 +116,7 @@ func (h *Handler) getChildren(name string) []os.FileInfo {
 		name = "/" + name
 	}
 	name = utils.PathUnescape(path.Clean(name))
-	root := path.Clean(h.getRootPath())
+	root := path.Clean(h.RootPath)
 
 	// top‐level “parents” (e.g. __all__, torrents etc)
 	if name == root {
@@ -147,7 +143,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 		name = "/" + name
 	}
 	name = utils.PathUnescape(path.Clean(name))
-	rootDir := path.Clean(h.getRootPath())
+	rootDir := path.Clean(h.RootPath)
 	metadataOnly := ctx.Value("metadataOnly") != nil
 	now := time.Now()
 
@@ -169,7 +165,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 	if children := h.getChildren(name); children != nil {
 		displayName := filepath.Clean(path.Base(name))
 		if name == rootDir {
-			displayName = string(os.PathSeparator)
+			displayName = "/"
 		}
 		return &File{
 			cache:        h.cache,
@@ -336,6 +332,8 @@ func (h *Handler) serveDirectory(w http.ResponseWriter, r *http.Request, file we
 	cleanPath := path.Clean(r.URL.Path)
 	parentPath := path.Dir(cleanPath)
 	showParent := cleanPath != "/" && parentPath != "." && parentPath != cleanPath
+	isBadPath := strings.HasSuffix(cleanPath, "__bad__")
+	_, canDelete := h.isParentPath(cleanPath)
 
 	// Prepare template data
 	data := struct {
@@ -343,73 +341,21 @@ func (h *Handler) serveDirectory(w http.ResponseWriter, r *http.Request, file we
 		ParentPath string
 		ShowParent bool
 		Children   []os.FileInfo
+		URLBase    string
+		IsBadPath  bool
+		CanDelete  bool
 	}{
 		Path:       cleanPath,
 		ParentPath: parentPath,
 		ShowParent: showParent,
 		Children:   children,
-	}
-
-	// Parse and execute template
-	funcMap := template.FuncMap{
-		"add": func(a, b int) int {
-			return a + b
-		},
-		"urlpath": func(p string) string {
-			segments := strings.Split(p, "/")
-			for i, segment := range segments {
-				segments[i] = url.PathEscape(segment)
-			}
-			return strings.Join(segments, "/")
-		},
-		"formatSize": func(bytes int64) string {
-			const (
-				KB = 1024
-				MB = 1024 * KB
-				GB = 1024 * MB
-				TB = 1024 * GB
-			)
-
-			var size float64
-			var unit string
-
-			switch {
-			case bytes >= TB:
-				size = float64(bytes) / TB
-				unit = "TB"
-			case bytes >= GB:
-				size = float64(bytes) / GB
-				unit = "GB"
-			case bytes >= MB:
-				size = float64(bytes) / MB
-				unit = "MB"
-			case bytes >= KB:
-				size = float64(bytes) / KB
-				unit = "KB"
-			default:
-				size = float64(bytes)
-				unit = "bytes"
-			}
-
-			// Format to 2 decimal places for larger units, no decimals for bytes
-			if unit == "bytes" {
-				return fmt.Sprintf("%.0f %s", size, unit)
-			}
-			return fmt.Sprintf("%.2f %s", size, unit)
-		},
-		"hasSuffix": strings.HasSuffix,
-	}
-	tmpl, err := template.New("directory").Funcs(funcMap).Parse(directoryTemplate)
-	if err != nil {
-		h.logger.Error().Err(err).Msg("Failed to parse directory template")
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
+		URLBase:    h.URLBase,
+		IsBadPath:  isBadPath,
+		CanDelete:  canDelete,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.Execute(w, data); err != nil {
-		h.logger.Error().Err(err).Msg("Failed to execute directory template")
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	if err := tplDirectory.ExecuteTemplate(w, "directory.html", data); err != nil {
 		return
 	}
 }
@@ -423,7 +369,12 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	defer fRaw.Close()
+	defer func(fRaw webdav.File) {
+		err := fRaw.Close()
+		if err != nil {
+			return
+		}
+	}(fRaw)
 
 	fi, err := fRaw.Stat()
 	if err != nil {
@@ -483,7 +434,12 @@ func (h *Handler) handleHead(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	defer f.Close()
+	defer func(f webdav.File) {
+		err := f.Close()
+		if err != nil {
+			return
+		}
+	}(f)
 
 	fi, err := f.Stat()
 	if err != nil {

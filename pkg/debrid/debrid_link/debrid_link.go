@@ -11,7 +11,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"strconv"
-	"sync"
 	"time"
 
 	"net/http"
@@ -23,7 +22,6 @@ type DebridLink struct {
 	Host             string `json:"host"`
 	APIKey           string
 	accounts         map[string]types.Account
-	accountsMutex    sync.RWMutex
 	DownloadUncached bool
 	client           *request.Client
 
