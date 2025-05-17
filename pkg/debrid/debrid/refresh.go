@@ -47,6 +47,12 @@ func (c *Cache) refreshTorrents() {
 		return
 	}
 
+	select {
+	case <-c.ctx.Done():
+		return
+	default:
+	}
+
 	// Get all torrents from the debrid service
 	debTorrents, err := c.client.GetTorrents()
 	if err != nil {
@@ -123,6 +129,12 @@ func (c *Cache) refreshTorrents() {
 func (c *Cache) refreshRclone() error {
 	cfg := c.config
 
+	select {
+	case <-c.ctx.Done():
+		return nil
+	default:
+	}
+
 	if cfg.RcUrl == "" {
 		return nil
 	}
@@ -196,6 +208,18 @@ func (c *Cache) refreshRclone() error {
 }
 
 func (c *Cache) refreshTorrent(torrentId string) *CachedTorrent {
+
+	if torrentId == "" {
+		c.logger.Error().Msg("Torrent ID is empty")
+		return nil
+	}
+
+	select {
+	case <-c.ctx.Done():
+		return nil
+	default:
+	}
+
 	torrent, err := c.client.GetTorrent(torrentId)
 	if err != nil {
 		c.logger.Error().Err(err).Msgf("Failed to get torrent %s", torrentId)
@@ -224,9 +248,17 @@ func (c *Cache) refreshDownloadLinks() {
 		return
 	}
 
+	select {
+	case <-c.ctx.Done():
+		return
+	default:
+	}
+
 	downloadLinks, err := c.client.GetDownloads()
+
 	if err != nil {
 		c.logger.Error().Err(err).Msg("Failed to get download links")
+		return
 	}
 	for k, v := range downloadLinks {
 		// if link is generated in the last 24 hours, add it to cache

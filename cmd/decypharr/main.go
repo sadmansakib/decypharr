@@ -72,6 +72,7 @@ func Start(ctx context.Context) error {
 
 				// Reload configuration
 				config.Reload()
+				service.Reset()
 
 				// Start services again with new context
 				go func() {
@@ -123,7 +124,7 @@ func startServices(ctx context.Context) error {
 
 	fmt.Printf(asciiArt, version.GetInfo(), cfg.LogLevel)
 
-	svc := service.New()
+	svc := service.GetService()
 	_qbit := qbit.New()
 	_webdav := webdav.New()
 

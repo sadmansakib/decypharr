@@ -54,13 +54,11 @@ func ProcessTorrent(d *Engine, magnet *utils.Magnet, a *arr.Arr, isSymlink, over
 
 	for index, db := range d.Clients {
 		logger := db.GetLogger()
-		logger.Info().Msgf("Processing debrid: %s", db.GetName())
+		logger.Info().Str("Debrid", db.GetName()).Str("Hash", debridTorrent.InfoHash).Msg("Processing torrent")
 
 		if !overrideDownloadUncached && a.DownloadUncached == nil {
 			debridTorrent.DownloadUncached = db.GetDownloadUncached()
 		}
-
-		logger.Info().Msgf("Torrent Hash: %s", debridTorrent.InfoHash)
 
 		//if db.GetCheckCached() {
 		//	hash, exists := db.IsAvailable([]string{debridTorrent.InfoHash})[debridTorrent.InfoHash]
@@ -78,7 +76,7 @@ func ProcessTorrent(d *Engine, magnet *utils.Magnet, a *arr.Arr, isSymlink, over
 			continue
 		}
 		dbt.Arr = a
-		logger.Info().Msgf("Torrent: %s(id=%s) submitted to %s", dbt.Name, dbt.Id, db.GetName())
+		logger.Info().Str("id", dbt.Id).Msgf("Torrent: %s submitted to %s", dbt.Name, db.GetName())
 		d.LastUsed = index
 
 		torrent, err := db.CheckStatus(dbt, isSymlink)

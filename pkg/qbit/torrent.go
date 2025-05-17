@@ -125,7 +125,7 @@ func (q *QBit) ProcessFiles(torrent *Torrent, debridTorrent *debridTypes.Torrent
 			rclonePath := filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent)) // /mnt/remote/realdebrid/MyTVShow
 			torrentFolderNoExt := utils.RemoveExtension(debridTorrent.Name)
 			torrentSymlinkPath, err = q.createSymlinksWebdav(debridTorrent, rclonePath, torrentFolderNoExt) // /mnt/symlinks/{category}/MyTVShow/
-			q.logger.Debug().Msgf("Adding %s took %s", debridTorrent.Name, time.Since(timer))
+			q.logger.Info().Msgf("Adding %s took %s", debridTorrent.Name, time.Since(timer))
 
 		} else {
 			// User is using either zurg or debrid webdav

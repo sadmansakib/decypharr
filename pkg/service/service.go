@@ -18,8 +18,8 @@ var (
 	once     sync.Once
 )
 
-func New() *Service {
-	once = sync.Once{}
+// GetService returns the singleton instance
+func GetService() *Service {
 	once.Do(func() {
 		arrs := arr.NewStorage()
 		deb := debrid.NewEngine()
@@ -32,23 +32,9 @@ func New() *Service {
 	return instance
 }
 
-// GetService returns the singleton instance
-func GetService() *Service {
-	if instance == nil {
-		instance = New()
-	}
-	return instance
-}
-
-func Update() *Service {
-	arrs := arr.NewStorage()
-	deb := debrid.NewEngine()
-	instance = &Service{
-		Repair: repair.New(arrs, deb),
-		Arr:    arrs,
-		Debrid: deb,
-	}
-	return instance
+func Reset() {
+	once = sync.Once{}
+	instance = nil
 }
 
 func GetDebrid() *debrid.Engine {

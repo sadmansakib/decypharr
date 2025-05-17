@@ -123,30 +123,43 @@ func (c *Cache) IsTorrentBroken(t *CachedTorrent, filenames []string) bool {
 }
 
 func (c *Cache) repairWorker() {
-	// This watches a channel for torrents to repair
-	for req := range c.repairChan {
-		torrentId := req.TorrentID
-		c.logger.Debug().Str("torrentId", req.TorrentID).Msg("Received repair request")
+	// This watches a channel for torrents to repair and can be cancelled via context
+	for {
+		select {
+		case <-c.ctx.Done():
+			// Context was cancelled, exit the goroutine
+			return
 
-		// Get the torrent from the cache
-		cachedTorrent := c.GetTorrent(torrentId)
-		if cachedTorrent == nil {
-			c.logger.Warn().Str("torrentId", torrentId).Msg("Torrent not found in cache")
-			continue
-		}
+		case req, ok := <-c.repairChan:
+			// Channel was closed
+			if !ok {
+				c.logger.Debug().Msg("Repair channel closed, shutting down worker")
+				return
+			}
 
-		switch req.Type {
-		case RepairTypeReinsert:
-			c.logger.Debug().Str("torrentId", torrentId).Msg("Reinserting torrent")
-			if _, err := c.reInsertTorrent(cachedTorrent); err != nil {
-				c.logger.Error().Err(err).Str("torrentId", cachedTorrent.Id).Msg("Failed to reinsert torrent")
+			torrentId := req.TorrentID
+			c.logger.Debug().Str("torrentId", req.TorrentID).Msg("Received repair request")
+
+			// Get the torrent from the cache
+			cachedTorrent := c.GetTorrent(torrentId)
+			if cachedTorrent == nil {
+				c.logger.Warn().Str("torrentId", torrentId).Msg("Torrent not found in cache")
 				continue
 			}
-		case RepairTypeDelete:
-			c.logger.Debug().Str("torrentId", torrentId).Msg("Deleting torrent")
-			if err := c.DeleteTorrent(torrentId); err != nil {
-				c.logger.Error().Err(err).Str("torrentId", torrentId).Msg("Failed to delete torrent")
-				continue
+
+			switch req.Type {
+			case RepairTypeReinsert:
+				c.logger.Debug().Str("torrentId", torrentId).Msg("Reinserting torrent")
+				if _, err := c.reInsertTorrent(cachedTorrent); err != nil {
+					c.logger.Error().Err(err).Str("torrentId", cachedTorrent.Id).Msg("Failed to reinsert torrent")
+					continue
+				}
+			case RepairTypeDelete:
+				c.logger.Debug().Str("torrentId", torrentId).Msg("Deleting torrent")
+				if err := c.DeleteTorrent(torrentId); err != nil {
+					c.logger.Error().Err(err).Str("torrentId", torrentId).Msg("Failed to delete torrent")
+					continue
+				}
 			}
 		}
 	}

@@ -131,12 +131,13 @@ func New(dc config.Debrid, client types.Client) *Cache {
 		customFolders = append(customFolders, name)
 
 	}
+	_log := logger.New(fmt.Sprintf("%s-webdav", client.GetName()))
 	c := &Cache{
 		dir: filepath.Join(cfg.Path, "cache", dc.Name), // path to save cache files
 
 		torrents:                      newTorrentCache(dirFilters),
 		client:                        client,
-		logger:                        logger.New(fmt.Sprintf("%s-webdav", client.GetName())),
+		logger:                        _log,
 		workers:                       dc.Workers,
 		downloadLinks:                 newDownloadLinkCache(),
 		torrentRefreshInterval:        dc.TorrentsRefreshInterval,
@@ -171,12 +172,9 @@ func (c *Cache) Start(ctx context.Context) error {
 		c.refreshDownloadLinks()
 	}()
 
-	go func() {
-		err := c.StartSchedule()
-		if err != nil {
-			c.logger.Error().Err(err).Msg("Failed to start cache worker")
-		}
-	}()
+	if err := c.StartSchedule(); err != nil {
+		c.logger.Error().Err(err).Msg("Failed to start cache worker")
+	}
 
 	c.repairChan = make(chan RepairRequest, 100)
 	go c.repairWorker()
@@ -273,7 +271,12 @@ func (c *Cache) load() (map[string]CachedTorrent, error) {
 
 	// Feed work to workers
 	for _, file := range jsonFiles {
-		workChan <- file
+		select {
+		case <-c.ctx.Done():
+			break // Context cancelled
+		default:
+			workChan <- file
+		}
 	}
 
 	// Signal workers that no more work is coming
