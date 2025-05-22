@@ -502,7 +502,7 @@ func (r *RealDebrid) _getDownloadLink(file *types.File) (*types.DownloadLink, er
 		}
 		var data ErrorResponse
 		if err = json.Unmarshal(b, &data); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error unmarshalling %d || %s \n %s", resp.StatusCode, err, string(b))
 		}
 		switch data.ErrorCode {
 		case 19:

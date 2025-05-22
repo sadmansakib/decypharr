@@ -1,10 +1,10 @@
 package webdav
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -388,6 +388,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 	defer func(fRaw webdav.File) {
 		err := fRaw.Close()
 		if err != nil {
+			h.logger.Error().Err(err).Msg("Failed to close file")
 			return
 		}
 	}(fRaw)
@@ -426,27 +427,47 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 		file.downloadLink = link
 		if h.cache.StreamWithRclone() {
 			// Redirect to the download link
-			http.Redirect(w, r, file.downloadLink, http.StatusFound)
+			http.Redirect(w, r, file.downloadLink, http.StatusTemporaryRedirect)
 			return
 		}
 	}
 
+	// ETags
+	etag := fmt.Sprintf("\"%x-%x\"", fi.ModTime().Unix(), fi.Size())
+	w.Header().Set("ETag", etag)
+
+	// 7. Content-Type by extension
+	ext := filepath.Ext(fi.Name())
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+
 	rs, ok := fRaw.(io.ReadSeeker)
 	if !ok {
-		// If not, read the entire file into memory as a fallback.
-		buf, err := io.ReadAll(fRaw)
-		if err != nil {
-			h.logger.Error().Err(err).Msg("Failed to read file content")
-			http.Error(w, "Server Error", http.StatusInternalServerError)
+		if r.Header.Get("Range") != "" {
+			http.Error(w, "Range not supported", http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
-		rs = bytes.NewReader(buf)
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", fi.Size()))
+		w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
+		w.Header().Set("Accept-Ranges", "bytes")
+		ctx := r.Context()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			io.Copy(w, fRaw)
+		}()
+		select {
+		case <-ctx.Done():
+			h.logger.Debug().Msg("Client cancelled download")
+			return
+		case <-done:
+		}
+		return
 	}
-	fileName := fi.Name()
-	contentType := getContentType(fileName)
-	w.Header().Set("Content-Type", contentType)
-	// http.ServeContent automatically handles Range requests.
-	http.ServeContent(w, r, fileName, fi.ModTime(), rs)
+	http.ServeContent(w, r, fi.Name(), fi.ModTime(), rs)
 }
 
 func (h *Handler) handleHead(w http.ResponseWriter, r *http.Request) {
