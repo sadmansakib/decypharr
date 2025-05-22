@@ -45,6 +45,20 @@ func (h *Handler) Mkdir(ctx context.Context, name string, perm os.FileMode) erro
 	return os.ErrPermission // Read-only filesystem
 }
 
+func (h *Handler) readinessMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-h.cache.IsReady():
+			// WebDAV is ready, proceed
+			next.ServeHTTP(w, r)
+		default:
+			// WebDAV is still initializing
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "WebDAV service is initializing, please try again shortly", http.StatusServiceUnavailable)
+		}
+	})
+}
+
 // RemoveAll implements webdav.FileSystem
 func (h *Handler) RemoveAll(ctx context.Context, name string) error {
 	if name[0] != '/' {
@@ -399,6 +413,7 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			h.logger.Debug().
 				Err(err).
+				Str("link", file.link).
 				Str("path", r.URL.Path).
 				Msg("Could not fetch download link")
 			http.Error(w, "Could not fetch download link", http.StatusPreconditionFailed)
@@ -409,6 +424,11 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		file.downloadLink = link
+		if h.cache.StreamWithRclone() {
+			// Redirect to the download link
+			http.Redirect(w, r, file.downloadLink, http.StatusFound)
+			return
+		}
 	}
 
 	rs, ok := fRaw.(io.ReadSeeker)

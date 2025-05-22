@@ -168,6 +168,10 @@ func (c *Cache) IsReady() chan struct{} {
 	return c.ready
 }
 
+func (c *Cache) StreamWithRclone() bool {
+	return c.config.ServeFromRclone
+}
+
 // Reset clears all internal state so the Cache can be reused without leaks.
 // Call this after stopping the old Cache (so no goroutines are holding references),
 // and before you discard the instance on a restart.

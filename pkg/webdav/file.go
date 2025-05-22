@@ -202,7 +202,7 @@ func (f *File) Read(p []byte) (n int, err error) {
 		// Make the request to get the file
 		resp, err := f.stream()
 		if err != nil {
-			return 0, io.EOF
+			return 0, err
 		}
 		if resp == nil {
 			return 0, io.EOF

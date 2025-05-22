@@ -153,7 +153,10 @@ func (wd *WebDav) Start(ctx context.Context) error {
 
 func (wd *WebDav) mountHandlers(r chi.Router) {
 	for _, h := range wd.Handlers {
-		r.Mount("/"+h.Name, h) // Mount to /name since router is already prefixed with /webdav
+		r.Route("/"+h.Name, func(r chi.Router) {
+			r.Use(h.readinessMiddleware)
+			r.Mount("/", h)
+		}) // Mount to /name since router is already prefixed with /webdav
 	}
 }
 

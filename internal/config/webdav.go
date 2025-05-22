@@ -10,6 +10,7 @@ type WebDav struct {
 	DownloadLinksRefreshInterval string `json:"download_links_refresh_interval,omitempty"`
 	Workers                      int    `json:"workers,omitempty"`
 	AutoExpireLinksAfter         string `json:"auto_expire_links_after,omitempty"`
+	ServeFromRclone              bool   `json:"serve_from_rclone,omitempty"`
 
 	// Folder
 	FolderNaming string `json:"folder_naming,omitempty"`
