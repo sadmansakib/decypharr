@@ -1,12 +1,12 @@
-# DecyphArr
+# Decypharr
 
 ![ui](docs/docs/images/main.png)
 
-**DecyphArr** is an implementation of QbitTorrent with **Multiple Debrid service support**, written in Go.
+**Decypharr** is an implementation of QbitTorrent with **Multiple Debrid service support**, written in Go.
 
-## What is DecyphArr?
+## What is Decypharr?
 
-DecyphArr combines the power of QBittorrent with popular Debrid services to enhance your media management. It provides a familiar interface for Sonarr, Radarr, and other \*Arr applications while leveraging the capabilities of Debrid providers.
+Decypharr combines the power of QBittorrent with popular Debrid services to enhance your media management. It provides a familiar interface for Sonarr, Radarr, and other \*Arr applications while leveraging the capabilities of Debrid providers.
 
 ## Features
 
