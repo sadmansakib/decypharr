@@ -23,6 +23,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/version"
+	"go.uber.org/ratelimit"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -36,6 +37,10 @@ type Torbox struct {
 	DownloadUncached bool
 	client           *request.Client
 	downloadSemaphore    *semaphore.Weighted
+
+	// Specialized rate limiters for createtorrent endpoint
+	createTorrentHourlyLimiter ratelimit.Limiter
+	createTorrentMinuteLimiter ratelimit.Limiter
 
 	MountPath   string
 	logger      zerolog.Logger
@@ -71,6 +76,10 @@ func New(dc config.Debrid) (*Torbox, error) {
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                client,
 		downloadSemaphore:     semaphore.NewWeighted(5),
+		// Initialize specialized rate limiters for createtorrent endpoint
+		// Using stricter limits: 60/hour and 10/min (10/min is more restrictive)
+		createTorrentHourlyLimiter: ratelimit.New(60, ratelimit.Per(time.Hour)),
+		createTorrentMinuteLimiter: ratelimit.New(10, ratelimit.Per(time.Minute)),
 		MountPath:             dc.Folder,
 		logger:                _log,
 		checkCached:           dc.CheckCached,
@@ -138,6 +147,11 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 }
 
 func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
+	// Apply specialized rate limiters for createtorrent endpoint
+	// Both limiters will be enforced, with the stricter one (10/min) blocking first
+	tb.createTorrentHourlyLimiter.Take()
+	tb.createTorrentMinuteLimiter.Take()
+
 	url := fmt.Sprintf("%s/api/torrents/createtorrent", tb.Host)
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
