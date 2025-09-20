@@ -142,6 +142,11 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 				result[strings.ToUpper(h)] = true
 			}
 		}
+
+		// Add delay between batches to respect rate limits (5/sec)
+		if i+100 < len(hashes) {
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
 	return result
 }
