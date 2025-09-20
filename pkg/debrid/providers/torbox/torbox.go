@@ -34,9 +34,9 @@ type Torbox struct {
 	accounts              *types.Accounts
 	autoExpiresLinksAfter time.Duration
 
-	DownloadUncached bool
-	client           *request.Client
-	downloadSemaphore    *semaphore.Weighted
+	DownloadUncached  bool
+	client            *request.Client
+	downloadSemaphore *semaphore.Weighted
 
 	// Specialized rate limiters for createtorrent endpoint
 	createTorrentHourlyLimiter ratelimit.Limiter
@@ -48,8 +48,37 @@ type Torbox struct {
 	addSamples  bool
 }
 
+// parseCreateTorrentHourlyLimit parses the hourly rate limit for createtorrent endpoint
+// Uses DownloadRateLimit config field, defaults to conservative 8/hour
+func parseCreateTorrentHourlyLimit(dc config.Debrid) ratelimit.Limiter {
+	// Use DownloadRateLimit for createtorrent hourly limit, default to conservative 8/hour
+	configLimit := dc.DownloadRateLimit
+	if configLimit == "" {
+		configLimit = "8/hour" // Conservative default: 8/hour (well below Torbox's 60/hour limit)
+	}
+
+	if rl := request.ParseRateLimit(configLimit); rl != nil {
+		return rl
+	}
+
+	// Fallback to conservative default if parsing fails
+	return ratelimit.New(8, ratelimit.Per(time.Hour))
+}
+
+// parseCreateTorrentMinuteLimit returns the minute rate limit for createtorrent endpoint
+// Fixed at 10/min as per Torbox edge limit
+func parseCreateTorrentMinuteLimit() ratelimit.Limiter {
+	// Fixed at 10/min as per Torbox API documentation (edge limit)
+	return ratelimit.New(10, ratelimit.Per(time.Minute))
+}
+
 func New(dc config.Debrid) (*Torbox, error) {
-	rl := request.ParseRateLimit(dc.RateLimit)
+	// Set conservative default rate limit if not configured
+	generalRateLimit := dc.RateLimit
+	if generalRateLimit == "" {
+		generalRateLimit = "4/sec" // Conservative default: 4/sec (below Torbox's 5/sec limit)
+	}
+	rl := request.ParseRateLimit(generalRateLimit)
 
 	headers := map[string]string{
 		"Authorization": fmt.Sprintf("Bearer %s", dc.APIKey),
@@ -77,13 +106,13 @@ func New(dc config.Debrid) (*Torbox, error) {
 		client:                client,
 		downloadSemaphore:     semaphore.NewWeighted(5),
 		// Initialize specialized rate limiters for createtorrent endpoint
-		// Using stricter limits: 60/hour and 10/min (10/min is more restrictive)
-		createTorrentHourlyLimiter: ratelimit.New(60, ratelimit.Per(time.Hour)),
-		createTorrentMinuteLimiter: ratelimit.New(10, ratelimit.Per(time.Minute)),
-		MountPath:             dc.Folder,
-		logger:                _log,
-		checkCached:           dc.CheckCached,
-		addSamples:            dc.AddSamples,
+		// Conservative defaults with user config override capability
+		createTorrentHourlyLimiter: parseCreateTorrentHourlyLimit(dc),
+		createTorrentMinuteLimiter: parseCreateTorrentMinuteLimit(),
+		MountPath:                  dc.Folder,
+		logger:                     _log,
+		checkCached:                dc.CheckCached,
+		addSamples:                 dc.AddSamples,
 	}, nil
 }
 
