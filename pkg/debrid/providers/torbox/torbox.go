@@ -2,6 +2,7 @@ package torbox
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"mime/multipart"
@@ -22,6 +23,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/version"
+	"golang.org/x/sync/semaphore"
 )
 
 type Torbox struct {
@@ -33,6 +35,7 @@ type Torbox struct {
 
 	DownloadUncached bool
 	client           *request.Client
+	downloadSemaphore    *semaphore.Weighted
 
 	MountPath   string
 	logger      zerolog.Logger
@@ -67,6 +70,7 @@ func New(dc config.Debrid) (*Torbox, error) {
 		DownloadUncached:      dc.DownloadUncached,
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                client,
+		downloadSemaphore:     semaphore.NewWeighted(5),
 		MountPath:             dc.Folder,
 		logger:                _log,
 		checkCached:           dc.CheckCached,
@@ -409,19 +413,27 @@ func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
 	var wg sync.WaitGroup
 	wg.Add(len(t.Files))
 	for _, file := range t.Files {
-		go func() {
+		go func(f types.File) {
 			defer wg.Done()
-			link, err := tb.GetDownloadLink(t, &file)
+
+			// Acquire semaphore to limit concurrent downloads
+			if err := tb.downloadSemaphore.Acquire(context.Background(), 1); err != nil {
+				errCh <- err
+				return
+			}
+			defer tb.downloadSemaphore.Release(1)
+
+			link, err := tb.GetDownloadLink(t, &f)
 			if err != nil {
 				errCh <- err
 				return
 			}
 			if link != nil {
 				linkCh <- link
-				file.DownloadLink = link
+				f.DownloadLink = link
 			}
-			filesCh <- file
-		}()
+			filesCh <- f
+		}(file)
 	}
 	go func() {
 		wg.Wait()
