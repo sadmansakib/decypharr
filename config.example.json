@@ -1,0 +1,103 @@
+{
+  "server": {
+    "bind": "0.0.0.0",
+    "port": "8282",
+    "url": "",
+    "secure": false
+  },
+  "debrid": [
+    {
+      "name": "realdebrid",
+      "api_key": "your_real_debrid_api_key",
+      "folder": "/mnt/remote/realdebrid/__all__",
+      "rate_limit": "200/minute",
+      "repair_rate_limit": "100/minute",
+      "download_rate_limit": "200/minute",
+      "use_webdav": true
+    },
+    {
+      "name": "torbox",
+      "api_key": "your_torbox_api_key",
+      "folder": "/mnt/remote/torbox/__all__",
+      "rate_limit": "4/second",
+      "repair_rate_limit": "4/second",
+      "download_rate_limit": "4/second",
+      "use_webdav": true
+    },
+    {
+      "name": "debridlink",
+      "api_key": "your_debrid_link_api_key",
+      "folder": "/mnt/remote/debridlink/__all__",
+      "rate_limit": "100/minute",
+      "repair_rate_limit": "50/minute",
+      "download_rate_limit": "100/minute",
+      "use_webdav": true
+    },
+    {
+      "name": "alldebrid",
+      "api_key": "your_all_debrid_api_key",
+      "folder": "/mnt/remote/alldebrid/__all__",
+      "rate_limit": "100/minute",
+      "repair_rate_limit": "50/minute",
+      "download_rate_limit": "100/minute",
+      "use_webdav": true
+    }
+  ],
+  "qbittorrent": {
+    "username": "admin",
+    "password": "adminpass",
+    "download_folder": "/app/downloads",
+    "categories": ["sonarr", "radarr", "lidarr"],
+    "refresh_interval": 30,
+    "skip_pre_cache": false,
+    "max_downloads": 10
+  },
+  "arrs": [
+    {
+      "name": "sonarr",
+      "host": "http://sonarr:8989",
+      "token": "your_sonarr_api_token",
+      "cleanup": true,
+      "skip_repair": false,
+      "download_uncached": false,
+      "selected_debrid": "torbox"
+    },
+    {
+      "name": "radarr",
+      "host": "http://radarr:7878",
+      "token": "your_radarr_api_token",
+      "cleanup": true,
+      "skip_repair": false,
+      "download_uncached": false,
+      "selected_debrid": "torbox"
+    }
+  ],
+  "repair": {
+    "enabled": true,
+    "interval": "6h",
+    "auto_process": false,
+    "use_webdav": true,
+    "workers": 3,
+    "reinsert": true,
+    "strategy": "per_torrent"
+  },
+  "rclone": {
+    "enabled": true,
+    "mount_path": "/mnt/remote",
+    "cache_dir": "/tmp/rclone-cache",
+    "uid": 1000,
+    "gid": 1000,
+    "buffer_size": "256M",
+    "vfs_cache_mode": "writes",
+    "vfs_cache_max_age": "1h",
+    "vfs_cache_max_size": "10G"
+  },
+  "web_dav": {
+    "enabled": true,
+    "port": "8080",
+    "username": "webdav",
+    "password": "webdav",
+    "read_buffer_size": "4096",
+    "write_buffer_size": "4096"
+  }
+}

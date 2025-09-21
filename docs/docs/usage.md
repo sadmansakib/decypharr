@@ -14,7 +14,30 @@ If it's the first time you're accessing the UI, you will be prompted to set up y
 - Set the **Mount/Rclone Folder**. This is where decypharr will look for added torrents to symlink them to your media library.
    - If you're using internal webdav, do not forget the `/__all__` suffix
 - Enable WebDAV
-- You can leave the remaining settings as default for now.
+- **Configure Rate Limits**: Set appropriate rate limits for each provider to avoid API throttling.
+
+#### Rate Limit Configuration
+
+Each debrid provider has different API rate limits. Configure these carefully to ensure smooth operation:
+
+**Torbox Rate Limits (Critical)**:
+- **General API**: 5 requests/second per IP
+- **Torrent Creation**: 60 requests/hour + 10 requests/minute
+- **Recommended Settings**:
+  - Rate Limit: `4/second` (conservative, stays under 5/sec limit)
+  - Repair Rate Limit: `4/second`
+  - Download Rate Limit: `4/second`
+
+**Other Providers**:
+- **Real Debrid**: `200/minute` (generally safe)
+- **Debrid Link**: `100/minute` (moderate usage)
+- **All Debrid**: `100/minute` (moderate usage)
+
+**Best Practices**:
+- Always use conservative rate limits to avoid hitting API maximums
+- Decypharr automatically validates and corrects excessive rate limits
+- Monitor logs for rate limit warnings
+- For high-volume usage with large torrents (50+ files), consider lower rate limits
 
 ### Qbittorent Configuration
    ![Qbittorrent Settings](images/settings/qbittorent.png)
