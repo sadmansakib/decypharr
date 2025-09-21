@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type RepairStrategy string
@@ -257,29 +258,78 @@ func parseRateLimit(rateLimit string) (float64, error) {
 	}
 }
 
-// validateTorboxRateLimits validates and corrects Torbox-specific rate limits against API constraints
-// Checks user-configured rate limits against Torbox API maximum limits:
-// - General API: 5 requests/second per IP
-// - POST /torrents/createtorrent: 60/hour and 10/minute per IP
-// - POST /usenet/createusenetdownload: 60/hour and 10/minute per IP
-// - POST /webdl/createwebdownload: 60/hour and 10/minute per IP
-// Returns corrected Debrid configuration with safe rate limits
-func validateTorboxRateLimits(debrid Debrid) Debrid {
+// validateDuration validates and corrects duration fields against reasonable limits
+func validateDuration(duration, fieldName, defaultValue string, minDur, maxDur time.Duration) (string, bool) {
+	if duration == "" {
+		return defaultValue, false
+	}
+
+	parsedDur, err := time.ParseDuration(duration)
+	if err != nil {
+		log.Printf("[WARNING] [Torbox] Invalid %s duration format '%s': %v. Using default '%s'",
+			fieldName, duration, err, defaultValue)
+		return defaultValue, true
+	}
+
+	if parsedDur < minDur {
+		log.Printf("[WARNING] [Torbox] %s duration '%s' is too short (min: %s). Using safe value '%s'",
+			fieldName, duration, minDur, defaultValue)
+		return defaultValue, true
+	}
+
+	if parsedDur > maxDur {
+		log.Printf("[WARNING] [Torbox] %s duration '%s' is too long (max: %s). Using safe value '%s'",
+			fieldName, duration, maxDur, defaultValue)
+		return defaultValue, true
+	}
+
+	return duration, false
+}
+
+// validateResourceLimit validates and corrects resource limit fields
+func validateResourceLimit(value int, fieldName string, minValue, maxValue, defaultValue int) (int, bool) {
+	if value == 0 {
+		return defaultValue, false
+	}
+
+	if value < minValue {
+		log.Printf("[WARNING] [Torbox] %s value %d is too low (min: %d). Using safe value %d",
+			fieldName, value, minValue, defaultValue)
+		return defaultValue, true
+	}
+
+	if value > maxValue {
+		log.Printf("[WARNING] [Torbox] %s value %d is too high (max: %d). Using safe value %d",
+			fieldName, value, maxValue, defaultValue)
+		return defaultValue, true
+	}
+
+	return value, false
+}
+
+// validateTorboxConfiguration validates and corrects Torbox-specific configuration against API constraints
+// Validates:
+// - Rate limits against Torbox API maximums
+// - Duration fields for reasonable intervals
+// - Resource limits for optimal performance
+// - Network configuration parameters
+// Returns corrected Debrid configuration with safe defaults
+func validateTorboxConfiguration(debrid Debrid) Debrid {
 	// Torbox API rate limits (converted to requests per second)
 	const (
-		maxGeneralAPIRate     = 5.0                     // 5/sec per IP
-		maxCreateTorrentHour  = 60.0 / 3600.0          // 60/hour = 0.0167/sec
-		maxCreateTorrentMin   = 10.0 / 60.0            // 10/min = 0.167/sec
-		maxCreateUsenetHour   = 60.0 / 3600.0          // 60/hour = 0.0167/sec
-		maxCreateUsenetMin    = 10.0 / 60.0            // 10/min = 0.167/sec
-		maxCreateWebdlHour    = 60.0 / 3600.0          // 60/hour = 0.0167/sec
-		maxCreateWebdlMin     = 10.0 / 60.0            // 10/min = 0.167/sec
+		maxGeneralAPIRate    = 5.0           // 5/sec per IP
+		maxCreateTorrentHour = 60.0 / 3600.0 // 60/hour = 0.0167/sec
+		maxCreateTorrentMin  = 10.0 / 60.0   // 10/min = 0.167/sec
+		maxCreateUsenetHour  = 60.0 / 3600.0 // 60/hour = 0.0167/sec
+		maxCreateUsenetMin   = 10.0 / 60.0   // 10/min = 0.167/sec
+		maxCreateWebdlHour   = 60.0 / 3600.0 // 60/hour = 0.0167/sec
+		maxCreateWebdlMin    = 10.0 / 60.0   // 10/min = 0.167/sec
 	)
 
 	// Safe default rate limits that respect Torbox API constraints
 	const (
-		safeGeneralRate = "4/second"     // Conservative general API rate
-		safeCreateRate  = "8/hour"       // Conservative create endpoint rate
+		safeGeneralRate = "4/second" // Conservative general API rate
+		safeCreateRate  = "8/hour"   // Conservative create endpoint rate
 	)
 
 	corrected := debrid // Copy the debrid config
@@ -326,8 +376,51 @@ func validateTorboxRateLimits(debrid Debrid) Debrid {
 		}
 	}
 
+	// Validate duration fields for WebDAV configuration
+	var durationCorrected bool
+	corrected.TorrentsRefreshInterval, durationCorrected = validateDuration(
+		corrected.TorrentsRefreshInterval, "TorrentsRefreshInterval", "45s",
+		10*time.Second, 300*time.Second)
+	if durationCorrected {
+		log.Printf("[INFO] [Torbox:%s] TorrentsRefreshInterval corrected to %s for optimal rate limiting", corrected.Name, corrected.TorrentsRefreshInterval)
+	}
+
+	corrected.DownloadLinksRefreshInterval, durationCorrected = validateDuration(
+		corrected.DownloadLinksRefreshInterval, "DownloadLinksRefreshInterval", "40m",
+		5*time.Minute, 120*time.Minute)
+	if durationCorrected {
+		log.Printf("[INFO] [Torbox:%s] DownloadLinksRefreshInterval corrected to %s for optimal rate limiting", corrected.Name, corrected.DownloadLinksRefreshInterval)
+	}
+
+	corrected.AutoExpireLinksAfter, durationCorrected = validateDuration(
+		corrected.AutoExpireLinksAfter, "AutoExpireLinksAfter", "3d",
+		1*time.Hour, 30*24*time.Hour)
+	if durationCorrected {
+		log.Printf("[INFO] [Torbox:%s] AutoExpireLinksAfter corrected to %s for optimal performance", corrected.Name, corrected.AutoExpireLinksAfter)
+	}
+
+	// Validate resource limits
+	var resourceCorrected bool
+	corrected.Workers, resourceCorrected = validateResourceLimit(
+		corrected.Workers, "Workers", 1, 200, 50)
+	if resourceCorrected {
+		log.Printf("[INFO] [Torbox:%s] Workers corrected to %d to prevent rate limit violations", corrected.Name, corrected.Workers)
+	}
+
+	corrected.MinimumFreeSlot, resourceCorrected = validateResourceLimit(
+		corrected.MinimumFreeSlot, "MinimumFreeSlot", 1, 100, 10)
+	if resourceCorrected {
+		log.Printf("[INFO] [Torbox:%s] MinimumFreeSlot corrected to %d for optimal resource management", corrected.Name, corrected.MinimumFreeSlot)
+	}
+
+	corrected.Limit, resourceCorrected = validateResourceLimit(
+		corrected.Limit, "Limit", 10, 1000, 100)
+	if resourceCorrected {
+		log.Printf("[INFO] [Torbox:%s] Limit corrected to %d for optimal torrent management", corrected.Name, corrected.Limit)
+	}
+
 	// Log information about Torbox-specific endpoint limits
-	log.Printf("[INFO] [Torbox:%s] API limits: General API 5/sec, Create endpoints 60/hour and 10/min. Rate limits validated and corrected if necessary", corrected.Name)
+	log.Printf("[INFO] [Torbox:%s] Configuration validated - API limits: General 5/sec, Create endpoints 60/hour and 10/min", corrected.Name)
 
 	return corrected
 }
@@ -347,10 +440,10 @@ func ValidateConfig(config *Config) error {
 		return err
 	}
 
-	// Validate and correct Torbox rate limits
+	// Validate and correct Torbox configuration
 	for i, debrid := range config.Debrids {
 		if strings.ToLower(debrid.Name) == "torbox" {
-			config.Debrids[i] = validateTorboxRateLimits(debrid)
+			config.Debrids[i] = validateTorboxConfiguration(debrid)
 		}
 	}
 
