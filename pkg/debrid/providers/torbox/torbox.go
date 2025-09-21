@@ -105,8 +105,8 @@ func New(dc config.Debrid) (*Torbox, error) {
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                client,
 		downloadSemaphore:     semaphore.NewWeighted(5),
-		// Initialize specialized rate limiters for createtorrent endpoint
-		// Conservative defaults with user config override capability
+		// Note: Endpoint-specific rate limiters are now handled by the request client
+		// Keep these for backward compatibility or direct access if needed
 		createTorrentHourlyLimiter: parseCreateTorrentHourlyLimit(dc),
 		createTorrentMinuteLimiter: parseCreateTorrentMinuteLimit(),
 		MountPath:                  dc.Folder,
@@ -181,10 +181,8 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 }
 
 func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
-	// Apply specialized rate limiters for createtorrent endpoint
-	// Both limiters will be enforced, with the stricter one (10/min) blocking first
-	tb.createTorrentHourlyLimiter.Take()
-	tb.createTorrentMinuteLimiter.Take()
+	// Rate limiting is now handled automatically by the request client
+	// based on endpoint patterns configured during client creation
 
 	url := fmt.Sprintf("%s/api/torrents/createtorrent", tb.Host)
 	payload := &bytes.Buffer{}

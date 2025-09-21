@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,18 +49,27 @@ var (
 
 type ClientOption func(*Client)
 
+// EndpointRateLimiter represents a rate limiter for a specific endpoint pattern
+type EndpointRateLimiter struct {
+	Pattern     string              // URL pattern to match (supports simple string matching or regex)
+	Limiters    []ratelimit.Limiter // Multiple rate limiters (e.g., hourly + per-minute)
+	IsRegex     bool                // Whether pattern is a regex
+	CompiledRx  *regexp.Regexp      // Compiled regex if IsRegex is true
+}
+
 // Client represents an HTTP client with additional capabilities
 type Client struct {
-	client          *http.Client
-	rateLimiter     ratelimit.Limiter
-	headers         map[string]string
-	headersMu       sync.RWMutex
-	maxRetries      int
-	timeout         time.Duration
-	skipTLSVerify   bool
-	retryableStatus map[int]struct{}
-	logger          zerolog.Logger
-	proxy           string
+	client              *http.Client
+	rateLimiter         ratelimit.Limiter
+	endpointRateLimiters []EndpointRateLimiter // Per-endpoint rate limiters
+	headers             map[string]string
+	headersMu           sync.RWMutex
+	maxRetries          int
+	timeout             time.Duration
+	skipTLSVerify       bool
+	retryableStatus     map[int]struct{}
+	logger              zerolog.Logger
+	proxy               string
 }
 
 // WithMaxRetries sets the maximum number of retry attempts
@@ -86,6 +96,25 @@ func WithRedirectPolicy(policy func(req *http.Request, via []*http.Request) erro
 func WithRateLimiter(rl ratelimit.Limiter) ClientOption {
 	return func(c *Client) {
 		c.rateLimiter = rl
+	}
+}
+
+// WithEndpointRateLimiters sets per-endpoint rate limiters
+// This allows different rate limiters for specific URL patterns
+func WithEndpointRateLimiters(limiters []EndpointRateLimiter) ClientOption {
+	return func(c *Client) {
+		// Compile regex patterns
+		for i := range limiters {
+			if limiters[i].IsRegex {
+				compiled, err := regexp.Compile(limiters[i].Pattern)
+				if err != nil {
+					c.logger.Error().Err(err).Msgf("Failed to compile regex pattern: %s", limiters[i].Pattern)
+					continue
+				}
+				limiters[i].CompiledRx = compiled
+			}
+		}
+		c.endpointRateLimiters = limiters
 	}
 }
 
@@ -134,6 +163,12 @@ func WithProxy(proxyURL string) ClientOption {
 
 // doRequest performs a single HTTP request with rate limiting
 func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
+	// Apply endpoint-specific rate limiting first
+	if len(c.endpointRateLimiters) > 0 {
+		c.applyEndpointRateLimit(req)
+	}
+
+	// Apply general rate limiting
 	if c.rateLimiter != nil {
 		select {
 		case <-req.Context().Done():
@@ -144,6 +179,38 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	}
 
 	return c.client.Do(req)
+}
+
+// applyEndpointRateLimit applies rate limiting based on the request URL
+func (c *Client) applyEndpointRateLimit(req *http.Request) {
+	requestURL := req.URL.String()
+
+	for _, limiter := range c.endpointRateLimiters {
+		matched := false
+
+		if limiter.IsRegex && limiter.CompiledRx != nil {
+			matched = limiter.CompiledRx.MatchString(requestURL)
+		} else {
+			// Simple string matching
+			matched = strings.Contains(requestURL, limiter.Pattern)
+		}
+
+		if matched {
+			// Apply all rate limiters for this endpoint (e.g., hourly + per-minute)
+			for _, rl := range limiter.Limiters {
+				if rl != nil {
+					select {
+					case <-req.Context().Done():
+						return
+					default:
+						rl.Take()
+					}
+				}
+			}
+			// Only apply the first matching pattern
+			return
+		}
+	}
 }
 
 // Do performs an HTTP request with retries for certain status codes
