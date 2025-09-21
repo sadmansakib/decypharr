@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -220,6 +223,115 @@ func validateRepair(config *Repair) error {
 	return nil
 }
 
+// parseRateLimit parses rate limit strings like "5/second", "200/minute", "60/hour"
+// Returns requests per second for comparison with API limits
+// Supports formats: "number/unit" where unit is second, minute, or hour
+// Examples: "5/second" -> 5.0, "120/minute" -> 2.0, "3600/hour" -> 1.0
+func parseRateLimit(rateLimit string) (float64, error) {
+	if rateLimit == "" {
+		return 0, nil
+	}
+
+	// Match patterns like "5/second", "200/minute", "60/hour" with optional spaces
+	re := regexp.MustCompile(`^\s*(\d+(?:\.\d+)?)\s*/\s*(second|minute|hour)\s*$`)
+	matches := re.FindStringSubmatch(strings.ToLower(rateLimit))
+	if len(matches) != 3 {
+		return 0, fmt.Errorf("invalid rate limit format: %s (expected format: 'number/unit' where unit is second, minute, or hour)", rateLimit)
+	}
+
+	rate, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid rate number in rate limit: %s", rateLimit)
+	}
+
+	// Convert to requests per second
+	switch matches[2] {
+	case "second":
+		return rate, nil
+	case "minute":
+		return rate / 60.0, nil
+	case "hour":
+		return rate / 3600.0, nil
+	default:
+		return 0, fmt.Errorf("unsupported time unit: %s", matches[2])
+	}
+}
+
+// validateTorboxRateLimits validates and corrects Torbox-specific rate limits against API constraints
+// Checks user-configured rate limits against Torbox API maximum limits:
+// - General API: 5 requests/second per IP
+// - POST /torrents/createtorrent: 60/hour and 10/minute per IP
+// - POST /usenet/createusenetdownload: 60/hour and 10/minute per IP
+// - POST /webdl/createwebdownload: 60/hour and 10/minute per IP
+// Returns corrected Debrid configuration with safe rate limits
+func validateTorboxRateLimits(debrid Debrid) Debrid {
+	// Torbox API rate limits (converted to requests per second)
+	const (
+		maxGeneralAPIRate     = 5.0                     // 5/sec per IP
+		maxCreateTorrentHour  = 60.0 / 3600.0          // 60/hour = 0.0167/sec
+		maxCreateTorrentMin   = 10.0 / 60.0            // 10/min = 0.167/sec
+		maxCreateUsenetHour   = 60.0 / 3600.0          // 60/hour = 0.0167/sec
+		maxCreateUsenetMin    = 10.0 / 60.0            // 10/min = 0.167/sec
+		maxCreateWebdlHour    = 60.0 / 3600.0          // 60/hour = 0.0167/sec
+		maxCreateWebdlMin     = 10.0 / 60.0            // 10/min = 0.167/sec
+	)
+
+	// Safe default rate limits that respect Torbox API constraints
+	const (
+		safeGeneralRate = "4/second"     // Conservative general API rate
+		safeCreateRate  = "8/hour"       // Conservative create endpoint rate
+	)
+
+	corrected := debrid // Copy the debrid config
+
+	// Validate and correct general rate limit
+	if corrected.RateLimit != "" {
+		rate, err := parseRateLimit(corrected.RateLimit)
+		if err != nil {
+			log.Printf("[WARNING] [Torbox:%s] Invalid rate limit format '%s': %v. Using safe default '%s'",
+				corrected.Name, corrected.RateLimit, err, safeGeneralRate)
+			corrected.RateLimit = safeGeneralRate
+		} else if rate > maxGeneralAPIRate {
+			log.Printf("[INFO] [Torbox:%s] Rate limit '%s' (%.3f/sec) exceeds API maximum of 5/second. Automatically corrected to '%s'",
+				corrected.Name, corrected.RateLimit, rate, safeGeneralRate)
+			corrected.RateLimit = safeGeneralRate
+		}
+	}
+
+	// Validate and correct repair rate limit (typically uses general API)
+	if corrected.RepairRateLimit != "" {
+		rate, err := parseRateLimit(corrected.RepairRateLimit)
+		if err != nil {
+			log.Printf("[WARNING] [Torbox:%s] Invalid repair rate limit format '%s': %v. Using safe default '%s'",
+				corrected.Name, corrected.RepairRateLimit, err, safeGeneralRate)
+			corrected.RepairRateLimit = safeGeneralRate
+		} else if rate > maxGeneralAPIRate {
+			log.Printf("[INFO] [Torbox:%s] Repair rate limit '%s' (%.3f/sec) exceeds API maximum of 5/second. Automatically corrected to '%s'",
+				corrected.Name, corrected.RepairRateLimit, rate, safeGeneralRate)
+			corrected.RepairRateLimit = safeGeneralRate
+		}
+	}
+
+	// Validate and correct download rate limit (typically uses general API)
+	if corrected.DownloadRateLimit != "" {
+		rate, err := parseRateLimit(corrected.DownloadRateLimit)
+		if err != nil {
+			log.Printf("[WARNING] [Torbox:%s] Invalid download rate limit format '%s': %v. Using safe default '%s'",
+				corrected.Name, corrected.DownloadRateLimit, err, safeGeneralRate)
+			corrected.DownloadRateLimit = safeGeneralRate
+		} else if rate > maxGeneralAPIRate {
+			log.Printf("[INFO] [Torbox:%s] Download rate limit '%s' (%.3f/sec) exceeds API maximum of 5/second. Automatically corrected to '%s'",
+				corrected.Name, corrected.DownloadRateLimit, rate, safeGeneralRate)
+			corrected.DownloadRateLimit = safeGeneralRate
+		}
+	}
+
+	// Log information about Torbox-specific endpoint limits
+	log.Printf("[INFO] [Torbox:%s] API limits: General API 5/sec, Create endpoints 60/hour and 10/min. Rate limits validated and corrected if necessary", corrected.Name)
+
+	return corrected
+}
+
 func ValidateConfig(config *Config) error {
 	// Run validations concurrently
 
@@ -233,6 +345,13 @@ func ValidateConfig(config *Config) error {
 
 	if err := validateRepair(&config.Repair); err != nil {
 		return err
+	}
+
+	// Validate and correct Torbox rate limits
+	for i, debrid := range config.Debrids {
+		if strings.ToLower(debrid.Name) == "torbox" {
+			config.Debrids[i] = validateTorboxRateLimits(debrid)
+		}
 	}
 
 	return nil
