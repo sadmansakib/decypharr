@@ -85,11 +85,20 @@ func New(dc config.Debrid) (*Torbox, error) {
 		"User-Agent":    fmt.Sprintf("Decypharr/%s (%s; %s)", version.GetInfo(), runtime.GOOS, runtime.GOARCH),
 	}
 	_log := logger.New(dc.Name)
+
+	// Configure circuit breaker for Torbox rate limiting (429 responses)
+	circuitBreakerConfig := request.CircuitBreakerConfig{
+		FailureThreshold:    3,                // Open circuit after 3 consecutive 429s
+		RecoveryTimeout:     60 * time.Second, // Wait 60 seconds before attempting recovery
+		MaxHalfOpenRequests: 1,                // Allow only 1 request during half-open state
+	}
+
 	client := request.New(
 		request.WithHeaders(headers),
 		request.WithRateLimiter(rl),
 		request.WithLogger(_log),
 		request.WithProxy(dc.Proxy),
+		request.WithCircuitBreaker(circuitBreakerConfig),
 	)
 	autoExpiresLinksAfter, err := time.ParseDuration(dc.AutoExpireLinksAfter)
 	if autoExpiresLinksAfter == 0 || err != nil {
