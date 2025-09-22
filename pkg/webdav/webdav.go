@@ -165,6 +165,43 @@ func (wd *WebDav) Start(ctx context.Context) error {
 	if len(errors) > 0 {
 		return fmt.Errorf("multiple handlers failed: %v", errors)
 	}
+
+	// Wait for context cancellation to handle graceful shutdown
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Stop gracefully stops all WebDAV handlers and their caches
+func (wd *WebDav) Stop() error {
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(wd.Handlers))
+
+	for _, h := range wd.Handlers {
+		wg.Add(1)
+		go func(h *Handler) {
+			defer wg.Done()
+			if h.cache != nil {
+				h.cache.Reset() // This stops schedulers and cleans up resources
+			}
+		}(h)
+	}
+
+	go func() {
+		wg.Wait()
+		close(errChan)
+	}()
+
+	// Collect any errors from stopping handlers
+	var errors []error
+	for err := range errChan {
+		if err != nil {
+			errors = append(errors, err)
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("errors stopping WebDAV handlers: %v", errors)
+	}
 	return nil
 }
 

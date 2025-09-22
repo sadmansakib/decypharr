@@ -102,20 +102,49 @@ func New(arrs *arr.Storage, engine *debrid.Storage) *Repair {
 	return r
 }
 
-func (r *Repair) Reset() {
-	// Stop scheduler
+// Stop gracefully stops the repair service
+func (r *Repair) Stop(ctx context.Context) error {
+	r.logger.Info().Msg("Stopping repair service")
+
+	// Cancel all running jobs
+	for id, job := range r.Jobs {
+		if job.Status == JobStarted || job.Status == JobProcessing {
+			r.logger.Debug().Str("job_id", id).Msg("Cancelling running job")
+			if job.cancelFunc != nil {
+				job.cancelFunc()
+			}
+			job.Status = JobCancelled
+		}
+	}
+
+	// Stop scheduler gracefully
 	if r.scheduler != nil {
+		r.logger.Debug().Msg("Stopping repair scheduler")
 		if err := r.scheduler.StopJobs(); err != nil {
-			r.logger.Error().Err(err).Msg("Error stopping scheduler")
+			r.logger.Error().Err(err).Msg("Error stopping scheduler jobs")
 		}
 
 		if err := r.scheduler.Shutdown(); err != nil {
 			r.logger.Error().Err(err).Msg("Error shutting down scheduler")
+			return err
 		}
 	}
+
+	r.logger.Info().Msg("Repair service stopped gracefully")
+	return nil
+}
+
+func (r *Repair) Reset() {
+	// Use the new Stop method for coordinated shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := r.Stop(ctx); err != nil {
+		r.logger.Error().Err(err).Msg("Error during repair reset")
+	}
+
 	// Reset jobs
 	r.Jobs = make(map[string]*Job)
-
 }
 
 func (r *Repair) Start(ctx context.Context) error {

@@ -203,30 +203,63 @@ func (s *Store) GetRemoveStalledAfter() time.Duration {
 
 // Reset cleans up the store (for backward compatibility with existing Reset function)
 func (s *Store) Reset() {
-	if s.debrid != nil {
-		s.debrid.Reset()
-	}
+	// Use the new Shutdown method for coordinated cleanup
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	if s.rcloneManager != nil {
-		s.rcloneManager.Stop()
-	}
-
-	if s.importsQueue != nil {
-		s.importsQueue.Close()
-	}
-
-	if s.downloadSemaphore != nil {
-		// Don't close as it might be reused
-		// close(s.downloadSemaphore)
-	}
-
-	if s.scheduler != nil {
-		_ = s.scheduler.StopJobs()
-		_ = s.scheduler.Shutdown()
+	if err := s.Shutdown(ctx); err != nil {
+		s.logger.Error().Err(err).Msg("Error during store reset")
 	}
 }
 
 // GetMaxDownloads returns the maximum number of downloads (for testing)
 func (s *Store) GetMaxDownloads() int {
 	return cap(s.downloadSemaphore)
+}
+
+// Shutdown gracefully shuts down all store services with proper coordination
+func (s *Store) Shutdown(ctx context.Context) error {
+	s.logger.Info().Msg("Initiating store shutdown...")
+
+	// Stop repair service first
+	if s.repair != nil {
+		s.logger.Debug().Msg("Stopping repair service...")
+		if err := s.repair.Stop(ctx); err != nil {
+			s.logger.Error().Err(err).Msg("Error stopping repair service")
+		}
+	}
+
+	// Stop debrid services
+	if s.debrid != nil {
+		s.logger.Debug().Msg("Stopping debrid services...")
+		s.debrid.Reset()
+	}
+
+	// Stop rclone manager
+	if s.rcloneManager != nil {
+		s.logger.Debug().Msg("Stopping rclone manager...")
+		if err := s.rcloneManager.Stop(); err != nil {
+			s.logger.Error().Err(err).Msg("Error stopping rclone manager")
+		}
+	}
+
+	// Close imports queue
+	if s.importsQueue != nil {
+		s.logger.Debug().Msg("Closing imports queue...")
+		s.importsQueue.Close()
+	}
+
+	// Stop scheduler
+	if s.scheduler != nil {
+		s.logger.Debug().Msg("Stopping scheduler...")
+		if err := s.scheduler.StopJobs(); err != nil {
+			s.logger.Error().Err(err).Msg("Error stopping scheduler jobs")
+		}
+		if err := s.scheduler.Shutdown(); err != nil {
+			s.logger.Error().Err(err).Msg("Error shutting down scheduler")
+		}
+	}
+
+	s.logger.Info().Msg("Store shutdown completed")
+	return nil
 }

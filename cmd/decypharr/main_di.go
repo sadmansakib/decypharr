@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -113,6 +114,7 @@ func StartWithDI(ctx context.Context) error {
 		// Create application services with dependency injection
 		appServices, err := NewAppServices(cfg)
 		if err != nil {
+			cancelSvc() // Ensure context is cancelled on error
 			return fmt.Errorf("failed to create application services: %w", err)
 		}
 
@@ -127,19 +129,47 @@ func StartWithDI(ctx context.Context) error {
 
 		select {
 		case <-ctx.Done():
-			// graceful shutdown
+			// Graceful shutdown with timeout
+			_log.Info().Msg("Initiating graceful shutdown...")
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer shutdownCancel()
+
 			cancelSvc() // propagate to services
-			<-done      // wait for them to finish
+
+			// Wait for services to stop with timeout
+			select {
+			case <-done:
+				_log.Info().Msg("All services stopped gracefully")
+			case <-shutdownCtx.Done():
+				_log.Warn().Msg("Graceful shutdown timeout reached, forcing shutdown")
+			}
+
+			if err := appServices.Shutdown(shutdownCtx); err != nil {
+				_log.Error().Err(err).Msg("Error during service shutdown")
+			}
 			_log.Info().Msg("Decypharr has been stopped gracefully.")
-			appServices.Reset() // reset services
 			return nil
 
 		case <-restartCh:
+			// Graceful restart with timeout
+			_log.Info().Msg("Initiating graceful restart...")
+			restartCtx, restartCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer restartCancel()
+
 			cancelSvc() // tell existing services to shut down
-			_log.Info().Msg("Restarting Decypharr...")
-			<-done // wait for them to finish
+
+			// Wait for services to stop with timeout
+			select {
+			case <-done:
+				_log.Info().Msg("Services stopped for restart")
+			case <-restartCtx.Done():
+				_log.Warn().Msg("Restart shutdown timeout reached, forcing restart")
+			}
+
+			if err := appServices.Shutdown(restartCtx); err != nil {
+				_log.Error().Err(err).Msg("Error during service shutdown for restart")
+			}
 			_log.Info().Msg("Decypharr has been restarted.")
-			appServices.Reset() // reset services
 			// rebuild svcCtx off the original parent
 			svcCtx, cancelSvc = context.WithCancel(ctx)
 		}
@@ -231,16 +261,45 @@ func startServicesWithDI(ctx context.Context, cancelSvc context.CancelFunc, appS
 	return nil
 }
 
-// Reset cleans up application services
-func (as *AppServices) Reset() {
+// Shutdown gracefully shuts down all application services
+func (as *AppServices) Shutdown(ctx context.Context) error {
+	as.logger.Info().Msg("Shutting down application services...")
+
+	// Stop WebDAV service
+	if as.webdav != nil {
+		if err := as.webdav.Stop(); err != nil {
+			as.logger.Error().Err(err).Msg("Error stopping WebDAV service")
+		}
+	}
+
+	// Reset QBit service
 	if as.qbit != nil {
 		as.qbit.Reset()
 	}
+
+	// Shutdown store
 	if as.store != nil {
-		as.store.Reset()
+		if err := as.store.Shutdown(ctx); err != nil {
+			as.logger.Error().Err(err).Msg("Error shutting down store")
+			return err
+		}
 	}
-	// refresh GC
+
+	// Force garbage collection
 	runtime.GC()
+	as.logger.Info().Msg("Application services shutdown completed")
+	return nil
+}
+
+// Reset cleans up application services (for backward compatibility)
+func (as *AppServices) Reset() {
+	// Use shutdown with a timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := as.Shutdown(ctx); err != nil {
+		as.logger.Error().Err(err).Msg("Error during application services reset")
+	}
 }
 
 // GetStore returns the store instance (for backward compatibility)

@@ -191,17 +191,20 @@ func (s *Storage) GetAll() []*Arr {
 }
 
 func (s *Storage) StartWorker(ctx context.Context) error {
-
 	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
 
-	select {
-	case <-ticker.C:
-		s.cleanupArrsQueue()
-	case <-ctx.Done():
-		ticker.Stop()
-		return nil
+	s.logger.Debug().Msg("Starting Arr cleanup worker")
+
+	for {
+		select {
+		case <-ticker.C:
+			s.cleanupArrsQueue()
+		case <-ctx.Done():
+			s.logger.Debug().Msg("Arr worker stopped gracefully")
+			return ctx.Err()
+		}
 	}
-	return nil
 }
 
 func (s *Storage) cleanupArrsQueue() {
