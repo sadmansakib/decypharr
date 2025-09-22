@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/pkg/qbit"
@@ -22,13 +23,13 @@ import (
 
 // AppServices holds all application services with dependency injection
 type AppServices struct {
-	store     *store.Store
-	qbit      *qbit.QBit
-	webdav    *webdav.WebDav
-	web       *web.Web
-	server    *server.Server
-	logger    logger.Logger
-	config    *config.Config
+	store  *store.Store
+	qbit   *qbit.QBit
+	webdav *webdav.WebDav
+	web    *web.Web
+	server *server.Server
+	logger zerolog.Logger
+	config *config.Config
 }
 
 // NewAppServices creates a new application services container with dependency injection
