@@ -213,7 +213,7 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 		return nil, err
 	}
 	if data.Data == nil {
-		return nil, fmt.Errorf("error adding torrent")
+		return nil, fmt.Errorf("failed to add torrent %s to Torbox: API response data is nil", torrent.Magnet.Name)
 	}
 	dt := *data.Data
 	torrentId := strconv.Itoa(dt.Id)
@@ -258,7 +258,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	}
 	data := res.Data
 	if data == nil {
-		return nil, fmt.Errorf("error getting torrent")
+		return nil, fmt.Errorf("failed to get torrent info from Torbox (ID: %s): API response data is nil", torrentId)
 	}
 	t := &types.Torrent{
 		Id:               strconv.Itoa(data.Id),
@@ -436,13 +436,13 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 			return torrent, nil
 		} else if utils.Contains(tb.GetDownloadingStatus(), status) {
 			if !torrent.DownloadUncached {
-				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
+				return torrent, fmt.Errorf("torrent %s (ID: %s) is not cached on Torbox and downloadUncached is disabled", torrent.Name, torrent.Id)
 			}
 			// Break out of the loop if the torrent is downloading.
 			// This is necessary to prevent infinite loop since we moved to sync downloading and async processing
 			return torrent, nil
 		} else {
-			return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
+			return torrent, fmt.Errorf("torrent %s (ID: %s) has error status: %s", torrent.Name, torrent.Id, status)
 		}
 
 	}
@@ -558,7 +558,7 @@ func (tb *Torbox) GetDownloadLink(t *types.Torrent, file *types.File) (*types.Do
 			Interface("error", data.Error).
 			Str("detail", data.Detail).
 			Msg("Torbox API returned no data")
-		return nil, fmt.Errorf("error getting download links")
+		return nil, fmt.Errorf("failed to get download link for file %s (ID: %s) from torrent %s (ID: %s): Torbox API response data is nil", file.Name, file.Id, t.Name, t.Id)
 	}
 
 	link := *data.Data
@@ -567,7 +567,7 @@ func (tb *Torbox) GetDownloadLink(t *types.Torrent, file *types.File) (*types.Do
 			Str("torrent_id", t.Id).
 			Str("file_id", file.Id).
 			Msg("Torbox API returned empty download link")
-		return nil, fmt.Errorf("error getting download links")
+		return nil, fmt.Errorf("failed to get download link for file %s (ID: %s) from torrent %s (ID: %s): Torbox API response data is nil", file.Name, file.Id, t.Name, t.Id)
 	}
 
 	now := time.Now()
@@ -601,7 +601,7 @@ func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
 	}
 
 	if !res.Success || res.Data == nil {
-		return nil, fmt.Errorf("torbox API error: %v", res.Error)
+		return nil, fmt.Errorf("Torbox API error while getting torrents list: %v", res.Error)
 	}
 
 	torrents := make([]*types.Torrent, 0, len(*res.Data))

@@ -64,7 +64,7 @@ func (s *Store) processDownload(torrent *Torrent, debridTorrent *types.Torrent) 
 	err := os.MkdirAll(torrentPath, os.ModePerm)
 	if err != nil {
 		// add the previous error to the error and return
-		return "", fmt.Errorf("failed to create directory: %s: %v", torrentPath, err)
+		return "", fmt.Errorf("failed to create torrent directory %s for torrent %s: %w", torrentPath, debridTorrent.Name, err)
 	}
 	s.downloadFiles(torrent, debridTorrent, torrentPath)
 	return torrentPath, nil
@@ -153,7 +153,7 @@ func (s *Store) downloadFiles(torrent *Torrent, debridTorrent *types.Torrent, pa
 func (s *Store) processSymlink(torrent *Torrent, debridTorrent *types.Torrent) (string, error) {
 	files := debridTorrent.Files
 	if len(files) == 0 {
-		return "", fmt.Errorf("no valid files found")
+		return "", fmt.Errorf("no valid files found for torrent %s (ID: %s)", debridTorrent.Name, debridTorrent.Id)
 	}
 	s.logger.Info().Msgf("Checking symlinks for %d files...", len(files))
 	rCloneBase := debridTorrent.MountPath
@@ -161,7 +161,7 @@ func (s *Store) processSymlink(torrent *Torrent, debridTorrent *types.Torrent) (
 	// This returns filename.ext for alldebrid instead of the parent folder filename/
 	torrentFolder := torrentPath
 	if err != nil {
-		return "", fmt.Errorf("failed to get torrent path: %v", err)
+		return "", fmt.Errorf("failed to get torrent path for %s (ID: %s): %w", debridTorrent.Name, debridTorrent.Id, err)
 	}
 	// Check if the torrent path is a file
 	torrentRclonePath := filepath.Join(rCloneBase, torrentPath) // leave it as is
@@ -173,7 +173,7 @@ func (s *Store) processSymlink(torrent *Torrent, debridTorrent *types.Torrent) (
 	torrentSymlinkPath := filepath.Join(torrent.SavePath, torrentFolder) // /mnt/symlinks/{category}/MyTVShow/
 	err = os.MkdirAll(torrentSymlinkPath, os.ModePerm)
 	if err != nil {
-		return "", fmt.Errorf("failed to create directory: %s: %v", torrentSymlinkPath, err)
+		return "", fmt.Errorf("failed to create symlink directory %s for torrent %s (ID: %s): %w", torrentSymlinkPath, debridTorrent.Name, debridTorrent.Id, err)
 	}
 
 	realPaths := make(map[string]string)
@@ -223,7 +223,7 @@ func (s *Store) processSymlink(torrent *Torrent, debridTorrent *types.Torrent) (
 			}
 		case <-timeout:
 			s.logger.Warn().Msgf("Timeout waiting for files, %d files still pending", len(pending))
-			return torrentSymlinkPath, fmt.Errorf("timeout waiting for files: %d files still pending", len(pending))
+			return torrentSymlinkPath, fmt.Errorf("timeout waiting for %d files for torrent %s (ID: %s) after 30 minutes", len(pending), debridTorrent.Name, debridTorrent.Id)
 		}
 	}
 	if s.skipPreCache {
@@ -246,7 +246,7 @@ func (s *Store) createSymlinksWebdav(torrent *Torrent, debridTorrent *types.Torr
 	symlinkPath := filepath.Join(torrent.SavePath, torrentFolder) // /mnt/symlinks/{category}/MyTVShow/
 	err := os.MkdirAll(symlinkPath, os.ModePerm)
 	if err != nil {
-		return "", fmt.Errorf("failed to create directory: %s: %v", symlinkPath, err)
+		return "", fmt.Errorf("failed to create webdav symlink directory %s for torrent %s (ID: %s): %w", symlinkPath, debridTorrent.Name, debridTorrent.Id, err)
 	}
 
 	remainingFiles := make(map[string]types.File)
@@ -286,7 +286,7 @@ func (s *Store) createSymlinksWebdav(torrent *Torrent, debridTorrent *types.Torr
 
 		case <-timeout:
 			s.logger.Warn().Msgf("Timeout waiting for files, %d files still pending", len(remainingFiles))
-			return symlinkPath, fmt.Errorf("timeout waiting for files")
+			return symlinkPath, fmt.Errorf("timeout waiting for webdav files for torrent %s (ID: %s) after 30 minutes", debridTorrent.Name, debridTorrent.Id)
 		}
 	}
 

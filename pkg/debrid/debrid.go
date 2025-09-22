@@ -247,7 +247,7 @@ func Process(ctx context.Context, store *Storage, selectedDebrid string, magnet 
 	})
 
 	if len(clients) == 0 {
-		return nil, fmt.Errorf("no debrid clients available")
+		return nil, fmt.Errorf("no debrid clients available for processing torrent %s (hash: %s, selected: %s)", magnet.Name, magnet.InfoHash, selectedDebrid)
 	}
 
 	errs := make([]error, 0, len(clients))
@@ -298,14 +298,14 @@ func Process(ctx context.Context, store *Storage, selectedDebrid string, magnet 
 			continue
 		}
 		if torrent == nil {
-			errs = append(errs, fmt.Errorf("torrent %s returned nil after checking status", dbt.Name))
+			errs = append(errs, fmt.Errorf("torrent %s (ID: %s) returned nil after checking status on %s", dbt.Name, dbt.Id, db.Name()))
 			continue
 		}
 		return torrent, nil
 	}
 	if len(errs) == 0 {
-		return nil, fmt.Errorf("failed to process torrent: no clients available")
+		return nil, fmt.Errorf("failed to process torrent %s (hash: %s): no clients available after filtering with selected debrid '%s'", magnet.Name, magnet.InfoHash, selectedDebrid)
 	}
 	joinedErrors := errors.Join(errs...)
-	return nil, fmt.Errorf("failed to process torrent: %w", joinedErrors)
+	return nil, fmt.Errorf("failed to process torrent %s (hash: %s) on all available debrid clients: %w", magnet.Name, magnet.InfoHash, joinedErrors)
 }

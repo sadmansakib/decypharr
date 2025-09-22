@@ -2,6 +2,7 @@ package store
 
 import (
 	"cmp"
+	"fmt"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -50,7 +51,7 @@ func (sf *ServiceFactory) CreateServices() (*Store, error) {
 
 	store, err := NewStore(storeConfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create store with service factory configuration: %w", err)
 	}
 
 	// Create services
@@ -106,7 +107,7 @@ func CreateStoreWithDependencies(
 ) (*Store, error) {
 	store, err := NewStore(storeConfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create store with provided dependencies: %w", err)
 	}
 
 	store.InjectServices(arrService, debridService, repairService, rcloneManager)

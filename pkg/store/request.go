@@ -130,7 +130,7 @@ func NewImportQueue(ctx context.Context, capacity int) *ImportQueue {
 
 func (iq *ImportQueue) Push(req *ImportRequest) error {
 	if req == nil {
-		return fmt.Errorf("import request cannot be nil")
+		return fmt.Errorf("cannot push import request: request is nil")
 	}
 
 	iq.mu.Lock()
@@ -138,12 +138,12 @@ func (iq *ImportQueue) Push(req *ImportRequest) error {
 
 	select {
 	case <-iq.ctx.Done():
-		return fmt.Errorf("queue is shutting down")
+		return fmt.Errorf("cannot push import request: queue is shutting down")
 	default:
 	}
 
 	if len(iq.queue) >= cap(iq.queue) {
-		return fmt.Errorf("queue is full")
+		return fmt.Errorf("cannot push import request: queue is full (capacity: %d)", cap(iq.queue))
 	}
 
 	iq.queue = append(iq.queue, req)
@@ -157,12 +157,12 @@ func (iq *ImportQueue) Pop() (*ImportRequest, error) {
 
 	select {
 	case <-iq.ctx.Done():
-		return nil, fmt.Errorf("queue is shutting down")
+		return nil, fmt.Errorf("cannot pop import request: queue is shutting down")
 	default:
 	}
 
 	if len(iq.queue) == 0 {
-		return nil, fmt.Errorf("no import requests available")
+		return nil, fmt.Errorf("cannot pop import request: queue is empty")
 	}
 
 	req := iq.queue[0]

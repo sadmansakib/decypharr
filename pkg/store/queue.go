@@ -10,11 +10,11 @@ import (
 
 func (s *Store) addToQueue(importReq *ImportRequest) error {
 	if importReq.Magnet == nil {
-		return fmt.Errorf("magnet is required")
+		return fmt.Errorf("cannot add import request to queue: magnet information is required")
 	}
 
 	if importReq.Arr == nil {
-		return fmt.Errorf("arr is required")
+		return fmt.Errorf("cannot add import request to queue: arr configuration is required")
 	}
 
 	importReq.Status = "queued"

@@ -358,12 +358,12 @@ func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
 		}
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("realdebrid API error: Status: %d || Body: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("Real-Debrid API error: status %d, body: %s", resp.StatusCode, string(bodyBytes))
 	}
 	defer resp.Body.Close()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
+		return nil, fmt.Errorf("failed to read Real-Debrid API response body: %w", err)
 	}
 	if err = json.Unmarshal(bodyBytes, &data); err != nil {
 		return nil, err
@@ -393,12 +393,12 @@ func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 		}
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("realdebrid API error: Status: %d || Body: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("Real-Debrid API error: status %d, body: %s", resp.StatusCode, string(bodyBytes))
 	}
 	defer resp.Body.Close()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
+		return nil, fmt.Errorf("failed to read Real-Debrid API response body: %w", err)
 	}
 	if err = json.Unmarshal(bodyBytes, &data); err != nil {
 		return nil, err
@@ -419,13 +419,13 @@ func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 	defer resp.Body.Close()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
+		return nil, fmt.Errorf("failed to read Real-Debrid API response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusNotFound {
 			return nil, utils.TorrentNotFoundError
 		}
-		return nil, fmt.Errorf("realdebrid API error: Status: %d || Body: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("Real-Debrid API error: status %d, body: %s", resp.StatusCode, string(bodyBytes))
 	}
 	var data torrentInfo
 	err = json.Unmarshal(bodyBytes, &data)
@@ -462,13 +462,13 @@ func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 	defer resp.Body.Close()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("reading response body: %w", err)
+		return fmt.Errorf("failed to read Real-Debrid API response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusNotFound {
 			return utils.TorrentNotFoundError
 		}
-		return fmt.Errorf("realdebrid API error: Status: %d || Body: %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("Real-Debrid API error: status %d, body: %s", resp.StatusCode, string(bodyBytes))
 	}
 	var data torrentInfo
 	err = json.Unmarshal(bodyBytes, &data)

@@ -159,7 +159,7 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 			return
 		}
 		if torrentSymlinkPath == "" {
-			err = fmt.Errorf("symlink path is empty for %s", debridTorrent.Name)
+			err = fmt.Errorf("symlink operation failed: empty symlink path returned for torrent %s (ID: %s, Debrid: %s)", debridTorrent.Name, debridTorrent.Id, debridTorrent.Debrid)
 			onFailed(err)
 		}
 		onSuccess(torrentSymlinkPath)
@@ -178,7 +178,7 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 			return
 		}
 		if torrentSymlinkPath == "" {
-			err = fmt.Errorf("download path is empty for %s", debridTorrent.Name)
+			err = fmt.Errorf("download operation failed: empty download path returned for torrent %s (ID: %s, Debrid: %s)", debridTorrent.Name, debridTorrent.Id, debridTorrent.Debrid)
 			onFailed(err)
 			return
 		}

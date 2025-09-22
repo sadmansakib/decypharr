@@ -240,7 +240,7 @@ func (r *Repair) preRunChecks() error {
 	if r.useWebdav {
 		caches := r.deb.Caches()
 		if len(caches) == 0 {
-			return fmt.Errorf("no caches found")
+			return fmt.Errorf("no debrid caches found for repair operation: ensure at least one debrid service is configured with WebDAV enabled")
 		}
 		return nil
 	}
@@ -265,7 +265,7 @@ func (r *Repair) AddJob(arrsNames []string, mediaIDs []string, autoProcess, recu
 	key := jobKey(arrsNames, mediaIDs)
 	job, ok := r.Jobs[key]
 	if job != nil && job.Status == JobStarted {
-		return fmt.Errorf("job already running")
+		return fmt.Errorf("repair job already running: only one repair job can be active at a time")
 	}
 	if !ok {
 		job = r.newJob(arrsNames, mediaIDs)
@@ -300,12 +300,12 @@ func (r *Repair) AddJob(arrsNames []string, mediaIDs []string, autoProcess, recu
 func (r *Repair) StopJob(id string) error {
 	job := r.GetJob(id)
 	if job == nil {
-		return fmt.Errorf("job %s not found", id)
+		return fmt.Errorf("repair job %s not found: job may have completed or been removed", id)
 	}
 
 	// Check if job can be stopped
 	if job.Status != JobStarted && job.Status != JobProcessing {
-		return fmt.Errorf("job %s cannot be stopped (status: %s)", id, job.Status)
+		return fmt.Errorf("repair job %s cannot be stopped: current status is %s (only running jobs can be stopped)", id, job.Status)
 	}
 
 	// Cancel the job
@@ -326,7 +326,7 @@ func (r *Repair) StopJob(id string) error {
 		return nil
 	}
 
-	return fmt.Errorf("job %s cannot be cancelled", id)
+	return fmt.Errorf("repair job %s cannot be cancelled: job is not in a cancellable state", id)
 }
 
 func (r *Repair) repair(job *Job) error {
@@ -716,7 +716,7 @@ func (r *Repair) GetJobs() []*Job {
 func (r *Repair) ProcessJob(id string) error {
 	job := r.GetJob(id)
 	if job == nil {
-		return fmt.Errorf("job %s not found", id)
+		return fmt.Errorf("repair job %s not found: job may have completed or been removed", id)
 	}
 	if job.Status != JobPending {
 		return fmt.Errorf("job %s not pending", id)

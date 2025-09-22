@@ -3,6 +3,7 @@ package store
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -53,7 +54,12 @@ func Get() *Store {
 
 		scheduler, err := gocron.NewScheduler(gocron.WithLocation(time.Local), gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-store")))
 		if err != nil {
-			scheduler, _ = gocron.NewScheduler(gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-store")))
+			// Fallback to scheduler without timezone location
+			var fallbackErr error
+			scheduler, fallbackErr = gocron.NewScheduler(gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-store")))
+			if fallbackErr != nil {
+				panic(fmt.Errorf("failed to create scheduler with timezone (%w) and fallback scheduler failed (%w)", err, fallbackErr))
+			}
 		}
 
 		instance = &Store{
