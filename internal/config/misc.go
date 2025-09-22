@@ -8,6 +8,15 @@ import (
 )
 
 func (c *Config) IsAllowedFile(filename string) bool {
+	// Use fast lookup if cache is valid
+	c.mu.RLock()
+	if c.cacheValid {
+		c.mu.RUnlock()
+		return c.FastIsAllowedFile(filename)
+	}
+	c.mu.RUnlock()
+
+	// Fallback to original implementation
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext == "" {
 		return false
@@ -15,8 +24,13 @@ func (c *Config) IsAllowedFile(filename string) bool {
 	// Remove the leading dot
 	ext = ext[1:]
 
-	for _, allowed := range c.AllowedExt {
-		if ext == allowed {
+	allowedExts := c.AllowedExt
+	if len(allowedExts) == 0 {
+		allowedExts = getDefaultExtensions()
+	}
+
+	for _, allowed := range allowedExts {
+		if ext == strings.ToLower(allowed) {
 			return true
 		}
 	}

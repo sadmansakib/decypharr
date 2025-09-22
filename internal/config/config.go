@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,9 +27,13 @@ const (
 )
 
 var (
-	instance   *Config
+	instance   atomic.Pointer[Config]
 	once       sync.Once
 	configPath string
+	// Pre-computed config values to avoid reflection overhead
+	cachedExtensions atomic.Pointer[[]string]
+	cachedMinFileSize atomic.Int64
+	cachedMaxFileSize atomic.Int64
 )
 
 type Debrid struct {
@@ -126,6 +131,35 @@ type Rclone struct {
 	LogLevel string `json:"log_level,omitempty"`
 }
 
+// ConfigProvider defines interface for configuration access
+type ConfigProvider interface {
+	GetServerConfig() ServerConfig
+	GetQBitTorrentConfig() QBitTorrent
+	GetDebridConfigs() []Debrid
+	GetRepairConfig() Repair
+	GetWebDavConfig() WebDav
+	GetRcloneConfig() Rclone
+	GetAuth() *Auth
+	IsAllowedFile(filename string) bool
+	IsSizeAllowed(size int64) bool
+	GetMinFileSize() int64
+	GetMaxFileSize() int64
+	NeedsSetup() error
+	NeedsAuth() bool
+}
+
+// ServerConfig holds server-specific configuration
+type ServerConfig struct {
+	BindAddress        string
+	URLBase            string
+	Port               string
+	LogLevel           string
+	UseAuth            bool
+	DiscordWebhook     string
+	RemoveStalledAfter string
+	Path               string
+}
+
 type Config struct {
 	// server
 	BindAddress string `json:"bind_address,omitempty"`
@@ -147,6 +181,14 @@ type Config struct {
 	Auth               *Auth       `json:"-"`
 	DiscordWebhook     string      `json:"discord_webhook_url,omitempty"`
 	RemoveStalledAfter string      `json:"remove_stalled_after,omitzero"`
+
+	// Cached values to avoid repeated JSON operations and reflection
+	mu                 sync.RWMutex
+	cachedMinSize      int64
+	cachedMaxSize      int64
+	cachedExtMap       map[string]struct{}
+	cachedExtensions   []string
+	cacheValid         bool
 }
 
 func (c *Config) JsonFile() string {
@@ -465,47 +507,102 @@ func SetConfigPath(path string) {
 
 func Get() *Config {
 	once.Do(func() {
-		instance = &Config{} // Initialize instance first
-		if err := instance.loadConfig(); err != nil {
+		cfg := &Config{} // Initialize instance first
+		if err := cfg.loadConfig(); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "configuration Error: %v\n", err)
 			os.Exit(1)
 		}
+		cfg.precomputeValues()
+		instance.Store(cfg)
 	})
-	return instance
+	return instance.Load()
+}
+
+// GetProvider returns the config as a ConfigProvider interface
+// This reduces coupling and improves testability
+func GetProvider() ConfigProvider {
+	return Get()
 }
 
 func (c *Config) GetMinFileSize() int64 {
+	c.mu.RLock()
+	if c.cacheValid {
+		defer c.mu.RUnlock()
+		return c.cachedMinSize
+	}
+	c.mu.RUnlock()
+
+	// Cache miss, compute and cache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if c.cacheValid {
+		return c.cachedMinSize
+	}
+
 	// 0 means no limit
 	if c.MinFileSize == "" {
-		return 0
+		c.cachedMinSize = 0
+	} else {
+		s, err := ParseSize(c.MinFileSize)
+		if err != nil {
+			c.cachedMinSize = 0
+		} else {
+			c.cachedMinSize = s
+		}
 	}
-	s, err := ParseSize(c.MinFileSize)
-	if err != nil {
-		return 0
-	}
-	return s
+
+	c.cacheValid = true
+	return c.cachedMinSize
 }
 
 func (c *Config) GetMaxFileSize() int64 {
+	c.mu.RLock()
+	if c.cacheValid {
+		defer c.mu.RUnlock()
+		return c.cachedMaxSize
+	}
+	c.mu.RUnlock()
+
+	// Cache miss, compute and cache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if c.cacheValid {
+		return c.cachedMaxSize
+	}
+
 	// 0 means no limit
 	if c.MaxFileSize == "" {
-		return 0
+		c.cachedMaxSize = 0
+	} else {
+		s, err := ParseSize(c.MaxFileSize)
+		if err != nil {
+			c.cachedMaxSize = 0
+		} else {
+			c.cachedMaxSize = s
+		}
 	}
-	s, err := ParseSize(c.MaxFileSize)
-	if err != nil {
-		return 0
-	}
-	return s
+
+	c.cacheValid = true
+	return c.cachedMaxSize
 }
 
 func (c *Config) IsSizeAllowed(size int64) bool {
 	if size == 0 {
 		return true // Maybe the debrid hasn't reported the size yet
 	}
-	if c.GetMinFileSize() > 0 && size < c.GetMinFileSize() {
+
+	// Use cached values for better performance
+	minSize := c.GetMinFileSize()
+	maxSize := c.GetMaxFileSize()
+
+	if minSize > 0 && size < minSize {
 		return false
 	}
-	if c.GetMaxFileSize() > 0 && size > c.GetMaxFileSize() {
+	if maxSize > 0 && size > maxSize {
 		return false
 	}
 	return true
@@ -666,7 +763,6 @@ func (c *Config) setDefaults() {
 }
 
 func (c *Config) Save() error {
-
 	c.setDefaults()
 
 	data, err := json.MarshalIndent(c, "", "  ")
@@ -677,6 +773,14 @@ func (c *Config) Save() error {
 	if err := os.WriteFile(c.JsonFile(), data, 0644); err != nil {
 		return err
 	}
+
+	// Invalidate cache and precompute new values
+	c.invalidateCache()
+	c.precomputeValues()
+
+	// Update the global instance
+	instance.Store(c)
+
 	return nil
 }
 
@@ -701,10 +805,162 @@ func (c *Config) createConfig(path string) error {
 
 // Reload forces a reload of the configuration from disk
 func Reload() {
-	instance = nil
 	once = sync.Once{}
+	cachedExtensions = atomic.Pointer[[]string]{}
+	cachedMinFileSize = atomic.Int64{}
+	cachedMaxFileSize = atomic.Int64{}
 }
 
 func DefaultFreeSlot() int {
 	return 10
+}
+
+// precomputeValues caches frequently accessed computed values
+func (c *Config) precomputeValues() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Precompute file size limits
+	if c.MinFileSize == "" {
+		c.cachedMinSize = 0
+	} else {
+		s, err := ParseSize(c.MinFileSize)
+		if err != nil {
+			c.cachedMinSize = 0
+		} else {
+			c.cachedMinSize = s
+		}
+	}
+
+	if c.MaxFileSize == "" {
+		c.cachedMaxSize = 0
+	} else {
+		s, err := ParseSize(c.MaxFileSize)
+		if err != nil {
+			c.cachedMaxSize = 0
+		} else {
+			c.cachedMaxSize = s
+		}
+	}
+
+	// Precompute allowed extensions map for O(1) lookup
+	extensions := c.AllowedExt
+	if len(extensions) == 0 {
+		extensions = getDefaultExtensions()
+	}
+
+	c.cachedExtensions = make([]string, len(extensions))
+	copy(c.cachedExtensions, extensions)
+
+	c.cachedExtMap = make(map[string]struct{}, len(extensions))
+	for _, ext := range extensions {
+		c.cachedExtMap[strings.ToLower(ext)] = struct{}{}
+	}
+
+	c.cacheValid = true
+}
+
+// invalidateCache marks the cache as invalid
+func (c *Config) invalidateCache() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cacheValid = false
+}
+
+// Implement ConfigProvider interface
+
+// GetServerConfig returns server-specific configuration
+func (c *Config) GetServerConfig() ServerConfig {
+	return ServerConfig{
+		BindAddress:        c.BindAddress,
+		URLBase:            c.URLBase,
+		Port:               c.Port,
+		LogLevel:           c.LogLevel,
+		UseAuth:            c.UseAuth,
+		DiscordWebhook:     c.DiscordWebhook,
+		RemoveStalledAfter: c.RemoveStalledAfter,
+		Path:               c.Path,
+	}
+}
+
+// GetQBitTorrentConfig returns QBittorrent configuration
+func (c *Config) GetQBitTorrentConfig() QBitTorrent {
+	return c.QBitTorrent
+}
+
+// GetDebridConfigs returns all debrid configurations
+func (c *Config) GetDebridConfigs() []Debrid {
+	// Return a copy to prevent external modification
+	debrids := make([]Debrid, len(c.Debrids))
+	copy(debrids, c.Debrids)
+	return debrids
+}
+
+// GetRepairConfig returns repair configuration
+func (c *Config) GetRepairConfig() Repair {
+	return c.Repair
+}
+
+// GetWebDavConfig returns WebDAV configuration
+func (c *Config) GetWebDavConfig() WebDav {
+	return c.WebDav
+}
+
+// GetRcloneConfig returns Rclone configuration
+func (c *Config) GetRcloneConfig() Rclone {
+	return c.Rclone
+}
+
+// FastIsAllowedFile provides optimized file extension checking using precomputed map
+func (c *Config) FastIsAllowedFile(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" {
+		return false
+	}
+	// Remove the leading dot
+	ext = ext[1:]
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if !c.cacheValid {
+		// Fallback to original method if cache is invalid
+		return c.IsAllowedFile(filename)
+	}
+
+	_, allowed := c.cachedExtMap[ext]
+	return allowed
+}
+
+// BatchConfigAccess provides efficient batch access to multiple config values
+type BatchConfigAccess struct {
+	ServerConfig ServerConfig
+	QBitTorrent  QBitTorrent
+	Debrids      []Debrid
+	Repair       Repair
+	WebDav       WebDav
+	Rclone       Rclone
+	MinFileSize  int64
+	MaxFileSize  int64
+	Extensions   []string
+}
+
+// GetBatchConfig returns multiple config sections in a single call
+// This reduces lock contention and improves performance when multiple
+// config values are needed together
+func (c *Config) GetBatchConfig() BatchConfigAccess {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return BatchConfigAccess{
+		ServerConfig: c.GetServerConfig(),
+		QBitTorrent:  c.QBitTorrent,
+		Debrids:      c.GetDebridConfigs(),
+		Repair:       c.Repair,
+		WebDav:       c.WebDav,
+		Rclone:       c.Rclone,
+		MinFileSize:  c.cachedMinSize,
+		MaxFileSize:  c.cachedMaxSize,
+		Extensions:   c.cachedExtensions,
+	}
 }
