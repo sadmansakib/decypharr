@@ -9,6 +9,9 @@ import (
 func (wb *Web) Routes() http.Handler {
 	r := chi.NewRouter()
 
+	// Add panic recovery middleware globally
+	r.Use(wb.panicRecoveryMiddleware)
+
 	// Load static files from embedded filesystem
 	staticFS, err := fs.Sub(assetsEmbed, "assets/build")
 	if err != nil {
