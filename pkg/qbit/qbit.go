@@ -30,6 +30,20 @@ func New() *QBit {
 	}
 }
 
+// NewWithStore creates a new QBit instance with dependency injection
+func NewWithStore(storeInstance *store.Store) *QBit {
+	_cfg := config.Get()
+	cfg := _cfg.QBitTorrent
+	return &QBit{
+		Username:       cfg.Username,
+		Password:       cfg.Password,
+		DownloadFolder: cfg.DownloadFolder,
+		Categories:     cfg.Categories,
+		storage:        storeInstance.Torrents(),
+		logger:         logger.New("qbit"),
+	}
+}
+
 func (q *QBit) Reset() {
 	if q.storage != nil {
 		q.storage.Reset()

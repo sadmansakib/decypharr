@@ -89,3 +89,31 @@ func New() *Web {
 		torrents:  store.Get().Torrents(),
 	}
 }
+
+// NewWithStore creates a new Web instance with dependency injection
+func NewWithStore(storeInstance *store.Store) *Web {
+	templates := template.Must(template.ParseFS(
+		content,
+		"templates/layout.html",
+		"templates/index.html",
+		"templates/download.html",
+		"templates/repair.html",
+		"templates/stats.html",
+		"templates/config.html",
+		"templates/login.html",
+		"templates/register.html",
+	))
+	secretKey := cmp.Or(os.Getenv("DECYPHARR_SECRET_KEY"), "\"wqj(v%lj*!-+kf@4&i95rhh_!5_px5qnuwqbr%cjrvrozz_r*(\"")
+	cookieStore := sessions.NewCookieStore([]byte(secretKey))
+	cookieStore.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   86400 * 7,
+		HttpOnly: false,
+	}
+	return &Web{
+		logger:    logger.New("ui"),
+		templates: templates,
+		cookie:    cookieStore,
+		torrents:  storeInstance.Torrents(),
+	}
+}

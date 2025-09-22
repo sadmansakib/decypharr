@@ -125,3 +125,102 @@ func (s *Store) RcloneManager() *rclone.Manager {
 func (s *Store) Scheduler() gocron.Scheduler {
 	return s.scheduler
 }
+
+// NewStore creates a new Store instance with dependency injection
+// This replaces the singleton pattern for better testability and flexibility
+func NewStore(config StoreConfig) (*Store, error) {
+	// Create scheduler
+	scheduler, err := gocron.NewScheduler(
+		gocron.WithLocation(time.Local),
+		gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-store")),
+	)
+	if err != nil {
+		scheduler, _ = gocron.NewScheduler(gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-store")))
+	}
+
+	store := &Store{
+		torrents:          newTorrentStorage(config.TorrentsFile),
+		logger:            config.Logger,
+		refreshInterval:   config.RefreshInterval,
+		skipPreCache:      config.SkipPreCache,
+		downloadSemaphore: make(chan struct{}, config.MaxDownloads),
+		importsQueue:      NewImportQueue(context.Background(), 1000),
+		scheduler:         scheduler,
+		removeStalledAfter: config.RemoveStalledAfter,
+	}
+
+	return store, nil
+}
+
+// StoreConfig holds configuration for creating a new Store
+type StoreConfig struct {
+	TorrentsFile       string
+	Logger             zerolog.Logger
+	RefreshInterval    time.Duration
+	SkipPreCache       bool
+	MaxDownloads       int
+	RemoveStalledAfter time.Duration
+}
+
+// InjectServices allows injecting dependencies after Store creation
+func (s *Store) InjectServices(
+	arrService *arr.Storage,
+	debridService *debrid.Storage,
+	repairService *repair.Repair,
+	rcloneManager *rclone.Manager,
+) {
+	s.arr = arrService
+	s.debrid = debridService
+	s.repair = repairService
+	s.rcloneManager = rcloneManager
+}
+
+// GetDownloadSemaphore returns the download semaphore (for backward compatibility)
+func (s *Store) GetDownloadSemaphore() chan struct{} {
+	return s.downloadSemaphore
+}
+
+// GetRefreshInterval returns the refresh interval (for backward compatibility)
+func (s *Store) GetRefreshInterval() time.Duration {
+	return s.refreshInterval
+}
+
+// GetSkipPreCache returns the skip pre-cache setting (for backward compatibility)
+func (s *Store) GetSkipPreCache() bool {
+	return s.skipPreCache
+}
+
+// GetRemoveStalledAfter returns the remove stalled after duration (for backward compatibility)
+func (s *Store) GetRemoveStalledAfter() time.Duration {
+	return s.removeStalledAfter
+}
+
+// Reset cleans up the store (for backward compatibility with existing Reset function)
+func (s *Store) Reset() {
+	if s.debrid != nil {
+		s.debrid.Reset()
+	}
+
+	if s.rcloneManager != nil {
+		s.rcloneManager.Stop()
+	}
+
+	if s.importsQueue != nil {
+		s.importsQueue.Close()
+	}
+
+	if s.downloadSemaphore != nil {
+		// Don't close as it might be reused
+		// close(s.downloadSemaphore)
+	}
+
+	if s.scheduler != nil {
+		_ = s.scheduler.StopJobs()
+		_ = s.scheduler.Shutdown()
+	}
+}
+
+// GetMaxDownloads returns the maximum number of downloads (for testing)
+func (s *Store) GetMaxDownloads() int {
+	return cap(s.downloadSemaphore)
+}

@@ -104,6 +104,22 @@ func New() *WebDav {
 	return w
 }
 
+// NewWithStore creates a new WebDav instance with dependency injection
+func NewWithStore(storeInstance *store.Store) *WebDav {
+	cfg := config.Get()
+	urlBase := cfg.URLBase
+
+	w := &WebDav{
+		Handlers: make([]*Handler, 0),
+		URLBase:  urlBase,
+	}
+	for name, c := range storeInstance.Debrid().Caches() {
+		h := NewHandler(name, urlBase, c, c.Logger())
+		w.Handlers = append(w.Handlers, h)
+	}
+	return w
+}
+
 func (wd *WebDav) Routes() http.Handler {
 	wr := chi.NewRouter()
 	wr.Use(middleware.StripSlashes)
