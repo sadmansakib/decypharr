@@ -3,6 +3,7 @@ package config
 import (
 	"cmp"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,10 @@ var (
 	cachedExtensions atomic.Pointer[[]string]
 	cachedMinFileSize atomic.Int64
 	cachedMaxFileSize atomic.Int64
+	// Validation caching
+	validationResultCache sync.Map // map[string]error - keyed by config hash
+	lastValidationTime atomic.Int64
+	validationCacheTTL = 30 * time.Second // Cache validation results for 30 seconds
 )
 
 type Debrid struct {
@@ -461,8 +466,15 @@ func validateTorboxConfiguration(debrid Debrid) Debrid {
 		log.Printf("[INFO] [Torbox:%s] Limit corrected to %d for optimal torrent management", corrected.Name, corrected.Limit)
 	}
 
-	// Log information about Torbox-specific endpoint limits
-	log.Printf("[INFO] [Torbox:%s] Configuration validated - API limits: General 5/sec, Create endpoints 60/hour and 10/min", corrected.Name)
+	// Only log on first validation or when config changes - reduce log spam
+	// This message was previously logged on every HTTP request causing unnecessary noise
+	if log.Default().Writer() != nil {
+		// Log at DEBUG level to reduce spam, or only log once per session
+		// Users can enable debug logging if they need to see this information
+		if strings.Contains(os.Getenv("LOG_LEVEL"), "debug") || strings.ToLower(os.Getenv("LOG_LEVEL")) == "debug" {
+			log.Printf("[DEBUG] [Torbox:%s] Configuration validated - API limits: General 5/sec, Create endpoints 60/hour and 10/min", corrected.Name)
+		}
+	}
 
 	return corrected
 }
@@ -634,7 +646,38 @@ func (c *Config) SaveAuth(auth *Auth) error {
 }
 
 func (c *Config) NeedsSetup() error {
-	return ValidateConfig(c)
+	// Check if we have a recent cached validation result
+	now := time.Now().Unix()
+	lastValidation := lastValidationTime.Load()
+
+	if now-lastValidation < int64(validationCacheTTL.Seconds()) {
+		// Generate a simple hash of the config for cache key
+		configHash := c.getConfigHash()
+		if cachedResult, exists := validationResultCache.Load(configHash); exists {
+			if cachedResult == nil {
+				return nil
+			}
+			return cachedResult.(error)
+		}
+	}
+
+	// Cache miss or expired, perform validation
+	err := ValidateConfig(c)
+
+	// Cache the result
+	configHash := c.getConfigHash()
+	validationResultCache.Store(configHash, err)
+	lastValidationTime.Store(now)
+
+	// Clean up old cache entries (simple cleanup)
+	validationResultCache.Range(func(key, value interface{}) bool {
+		if key != configHash {
+			validationResultCache.Delete(key)
+		}
+		return true
+	})
+
+	return err
 }
 
 func (c *Config) NeedsAuth() bool {
@@ -778,6 +821,13 @@ func (c *Config) Save() error {
 	c.invalidateCache()
 	c.precomputeValues()
 
+	// Clear validation cache when config changes
+	validationResultCache.Range(func(key, value interface{}) bool {
+		validationResultCache.Delete(key)
+		return true
+	})
+	lastValidationTime.Store(0)
+
 	// Update the global instance
 	instance.Store(c)
 
@@ -809,6 +859,13 @@ func Reload() {
 	cachedExtensions = atomic.Pointer[[]string]{}
 	cachedMinFileSize = atomic.Int64{}
 	cachedMaxFileSize = atomic.Int64{}
+
+	// Clear validation cache on reload
+	validationResultCache.Range(func(key, value interface{}) bool {
+		validationResultCache.Delete(key)
+		return true
+	})
+	lastValidationTime.Store(0)
 }
 
 func DefaultFreeSlot() int {
@@ -963,4 +1020,20 @@ func (c *Config) GetBatchConfig() BatchConfigAccess {
 		MaxFileSize:  c.cachedMaxSize,
 		Extensions:   c.cachedExtensions,
 	}
+}
+
+// getConfigHash generates a simple hash of the configuration for caching
+// This is used to detect when the configuration has changed
+func (c *Config) getConfigHash() string {
+	// Create a simple hash based on key configuration fields
+	// This doesn't need to be cryptographically secure, just consistent
+	hash := sha256.New()
+
+	// Include key fields that affect validation
+	fmt.Fprintf(hash, "%s|%s|%d", c.LogLevel, c.Port, len(c.Debrids))
+	for _, debrid := range c.Debrids {
+		fmt.Fprintf(hash, "|%s:%s:%s", debrid.Name, debrid.RateLimit, debrid.RepairRateLimit)
+	}
+
+	return fmt.Sprintf("%x", hash.Sum(nil))[:16] // Use first 16 chars for cache key
 }
