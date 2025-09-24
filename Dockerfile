@@ -1,5 +1,6 @@
+# syntax=docker/dockerfile:1
 # Stage 1: Build binaries
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine as builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -10,7 +11,8 @@ WORKDIR /app
 
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download -x
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
 
 COPY . .
 
@@ -35,11 +37,11 @@ FROM alpine:latest
 ARG VERSION=0.0.0
 ARG CHANNEL=dev
 
-LABEL version = "${VERSION}-${CHANNEL}"
-LABEL org.opencontainers.image.source = "https://github.com/sirrobot01/decypharr"
-LABEL org.opencontainers.image.title = "decypharr"
-LABEL org.opencontainers.image.authors = "sirrobot01"
-LABEL org.opencontainers.image.documentation = "https://github.com/sirrobot01/decypharr/blob/main/README.md"
+LABEL version="${VERSION}-${CHANNEL}" \
+      org.opencontainers.image.source="https://github.com/sirrobot01/decypharr" \
+      org.opencontainers.image.title="decypharr" \
+      org.opencontainers.image.authors="sirrobot01" \
+      org.opencontainers.image.documentation="https://github.com/sirrobot01/decypharr/blob/main/README.md"
 
 # Install dependencies including rclone
 RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip && \
