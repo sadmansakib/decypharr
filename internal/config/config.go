@@ -440,7 +440,7 @@ func validateTorboxConfiguration(debrid Debrid) Debrid {
 	}
 
 	corrected.AutoExpireLinksAfter, durationCorrected = validateDuration(
-		corrected.AutoExpireLinksAfter, "AutoExpireLinksAfter", "72h",
+		corrected.AutoExpireLinksAfter, "AutoExpireLinksAfter", "24h",
 		1*time.Hour, 30*24*time.Hour)
 	if durationCorrected {
 		log.Printf("[INFO] [Torbox:%s] AutoExpireLinksAfter corrected to %s for optimal performance", corrected.Name, corrected.AutoExpireLinksAfter)
@@ -718,7 +718,7 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 		d.FolderNaming = cmp.Or(c.WebDav.FolderNaming, "original_no_ext")
 	}
 	if d.AutoExpireLinksAfter == "" {
-		d.AutoExpireLinksAfter = cmp.Or(c.WebDav.AutoExpireLinksAfter, "72h") // 3 days
+		d.AutoExpireLinksAfter = cmp.Or(c.WebDav.AutoExpireLinksAfter, "24h") // 1 day
 	}
 
 	// Merge debrid specified directories with global directories
