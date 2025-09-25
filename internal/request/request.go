@@ -73,19 +73,38 @@ type CircuitBreaker struct {
 	lastFailureTime  int64 // Unix timestamp of last failure (atomic)
 	logger           zerolog.Logger
 	mu               sync.RWMutex
+	// Lifecycle management
+	ctx              context.Context
+	cancel           context.CancelFunc
+	done             chan struct{}
+	closed           int32 // Atomic flag to indicate if closed
 }
 
 // NewCircuitBreaker creates a new circuit breaker
 func NewCircuitBreaker(config CircuitBreakerConfig, logger zerolog.Logger) *CircuitBreaker {
-	return &CircuitBreaker{
+	ctx, cancel := context.WithCancel(context.Background())
+	cb := &CircuitBreaker{
 		config: config,
 		state:  int32(CircuitClosed),
 		logger: logger,
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
+
+	// Start background cleanup goroutine
+	go cb.cleanupRoutine()
+
+	return cb
 }
 
 // Allow checks if a request should be allowed through the circuit breaker
 func (cb *CircuitBreaker) Allow() error {
+	// Check if circuit breaker is closed/shutdown
+	if atomic.LoadInt32(&cb.closed) == 1 {
+		return fmt.Errorf("circuit breaker is closed")
+	}
+
 	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
 
 	switch state {
@@ -117,6 +136,11 @@ func (cb *CircuitBreaker) Allow() error {
 
 // RecordSuccess records a successful response
 func (cb *CircuitBreaker) RecordSuccess() {
+	// Check if circuit breaker is closed
+	if atomic.LoadInt32(&cb.closed) == 1 {
+		return
+	}
+
 	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
 
 	switch state {
@@ -134,6 +158,11 @@ func (cb *CircuitBreaker) RecordSuccess() {
 
 // RecordFailure records a 429 response failure
 func (cb *CircuitBreaker) RecordFailure() {
+	// Check if circuit breaker is closed
+	if atomic.LoadInt32(&cb.closed) == 1 {
+		return
+	}
+
 	atomic.StoreInt64(&cb.lastFailureTime, time.Now().Unix())
 	failures := atomic.AddInt32(&cb.failureCount, 1)
 
@@ -151,6 +180,74 @@ func (cb *CircuitBreaker) RecordFailure() {
 		if atomic.CompareAndSwapInt32(&cb.state, int32(CircuitHalfOpen), int32(CircuitOpen)) {
 			cb.logger.Warn().Msg("Circuit breaker reopened - service still rate limiting")
 		}
+	}
+}
+
+// Close gracefully shuts down the circuit breaker and cleans up resources
+func (cb *CircuitBreaker) Close() error {
+	// Set closed flag atomically
+	if !atomic.CompareAndSwapInt32(&cb.closed, 0, 1) {
+		// Already closed
+		return nil
+	}
+
+	cb.logger.Debug().Msg("Closing circuit breaker")
+
+	// Cancel context to signal cleanup goroutine
+	if cb.cancel != nil {
+		cb.cancel()
+	}
+
+	// Wait for cleanup goroutine to finish
+	select {
+	case <-cb.done:
+		cb.logger.Debug().Msg("Circuit breaker cleanup completed")
+	case <-time.After(5 * time.Second):
+		cb.logger.Warn().Msg("Circuit breaker cleanup timeout - forcing close")
+	}
+
+	return nil
+}
+
+// cleanupRoutine runs in background to handle periodic cleanup and state management
+func (cb *CircuitBreaker) cleanupRoutine() {
+	defer close(cb.done)
+
+	// Cleanup ticker for periodic maintenance (e.g., reset old failure counts)
+	ticker := time.NewTicker(cb.config.RecoveryTimeout)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-cb.ctx.Done():
+			cb.logger.Debug().Msg("Circuit breaker cleanup routine shutting down")
+			return
+		case <-ticker.C:
+			// Periodic maintenance - clean up old state if needed
+			cb.periodicMaintenance()
+		}
+	}
+}
+
+// periodicMaintenance performs periodic cleanup of circuit breaker state
+func (cb *CircuitBreaker) periodicMaintenance() {
+	// Check if circuit breaker is closed
+	if atomic.LoadInt32(&cb.closed) == 1 {
+		return
+	}
+
+	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
+	lastFailure := time.Unix(atomic.LoadInt64(&cb.lastFailureTime), 0)
+
+	// If circuit has been open for a very long time, log for monitoring
+	if state == CircuitOpen && time.Since(lastFailure) > cb.config.RecoveryTimeout*5 {
+		cb.logger.Info().Dur("duration", time.Since(lastFailure)).Msg("Circuit breaker has been open for extended period")
+	}
+
+	// Reset failure count if circuit has been closed for a long time without failures
+	if state == CircuitClosed && atomic.LoadInt32(&cb.failureCount) > 0 && time.Since(lastFailure) > cb.config.RecoveryTimeout*2 {
+		atomic.StoreInt32(&cb.failureCount, 0)
+		cb.logger.Debug().Msg("Reset circuit breaker failure count after extended success period")
 	}
 }
 
@@ -462,6 +559,17 @@ func (c *Client) Get(url string) (*http.Response, error) {
 	}
 
 	return c.Do(req)
+}
+
+// Close gracefully shuts down the client and cleans up resources
+func (c *Client) Close() error {
+	if c.circuitBreaker != nil {
+		if err := c.circuitBreaker.Close(); err != nil {
+			c.logger.Warn().Err(err).Msg("Failed to close circuit breaker")
+			return err
+		}
+	}
+	return nil
 }
 
 // New creates a new HTTP client with the specified options
