@@ -42,6 +42,68 @@ type Torbox struct {
 	addSamples  bool
 }
 
+// validateTorboxRateLimit validates and returns a safe rate limiter for Torbox API
+// According to Torbox API specification:
+// - General endpoints: 5/sec per IP (no edge rate limiting)
+// - Specific endpoints have their own limits (handled separately)
+func validateTorboxRateLimit(rateLimit string, logger zerolog.Logger) (ratelimit.Limiter, bool) {
+	if rateLimit == "" {
+		logger.Warn().Msg("Empty rate limit provided for Torbox, using default 5/second")
+		return request.ParseRateLimit("5/second"), true
+	}
+
+	// Parse the provided rate limit
+	parsed := request.ParseRateLimit(rateLimit)
+	if parsed == nil {
+		logger.Warn().Str("rate_limit", rateLimit).Msg("Invalid rate limit format for Torbox, using fallback 5/second")
+		return request.ParseRateLimit("5/second"), true
+	}
+
+	// Extract rate information to validate against Torbox limits
+	parts := strings.SplitN(rateLimit, "/", 2)
+	if len(parts) != 2 {
+		logger.Warn().Str("rate_limit", rateLimit).Msg("Invalid rate limit format for Torbox, using fallback 5/second")
+		return request.ParseRateLimit("5/second"), true
+	}
+
+	count, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || count <= 0 {
+		logger.Warn().Str("rate_limit", rateLimit).Msg("Invalid rate limit count for Torbox, using fallback 5/second")
+		return request.ParseRateLimit("5/second"), true
+	}
+
+	unit := strings.ToLower(strings.TrimSpace(parts[1]))
+	unit = strings.TrimSuffix(unit, "s")
+
+	// Check if the rate exceeds Torbox's 5/second limit
+	var ratePerSecond float64
+	switch unit {
+	case "second", "sec":
+		ratePerSecond = float64(count)
+	case "minute", "min":
+		ratePerSecond = float64(count) / 60.0
+	case "hour", "hr":
+		ratePerSecond = float64(count) / 3600.0
+	case "day", "d":
+		ratePerSecond = float64(count) / 86400.0
+	default:
+		logger.Warn().Str("rate_limit", rateLimit).Str("unit", unit).Msg("Unknown rate limit unit for Torbox, using fallback 5/second")
+		return request.ParseRateLimit("5/second"), true
+	}
+
+	// Torbox allows maximum 5/second
+	if ratePerSecond > 5.0 {
+		logger.Warn().
+			Str("provided_rate_limit", rateLimit).
+			Float64("rate_per_second", ratePerSecond).
+			Msg("Rate limit exceeds Torbox API specification (5/second), using fallback 5/second")
+		return request.ParseRateLimit("5/second"), true
+	}
+
+	// Rate limit is valid and within spec
+	return parsed, false
+}
+
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
 
 	headers := map[string]string{
@@ -50,12 +112,31 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 	}
 	_log := logger.New(dc.Name)
 
+	// Validate and potentially fallback the main rate limiter for Torbox API compliance
+	validatedMainRL, hadFallback := validateTorboxRateLimit(dc.RateLimit, _log)
+	if hadFallback {
+		_log.Info().Str("fallback_rate_limit", "5/second").Msg("Applied Torbox API compliant rate limit fallback")
+	}
+
+	// Update the main rate limiter with validated one
+	ratelimits["main"] = validatedMainRL
+
 	// Create endpoint-specific rate limiters for Torbox
 	createTorrentLimiter := request.NewMultiRateLimiter("60/hour", "10/minute")
+	createUsenetDownloadLimiter := request.NewMultiRateLimiter("60/hour", "10/minute")
+	createWebDownloadLimiter := request.NewMultiRateLimiter("60/hour", "10/minute")
 	endpointRateLimiters := []request.EndpointRateLimiter{
 		{
 			Pattern:  "/api/torrents/createtorrent",
 			Limiters: []ratelimit.Limiter{createTorrentLimiter},
+		},
+		{
+			Pattern:  "/api/usenet/createusenetdownload",
+			Limiters: []ratelimit.Limiter{createUsenetDownloadLimiter},
+		},
+		{
+			Pattern:  "/api/webdl/createwebdownload",
+			Limiters: []ratelimit.Limiter{createWebDownloadLimiter},
 		},
 	}
 

@@ -323,7 +323,7 @@ class ConfigManager {
                             </label>
                             <input type="text" class="input input-bordered" 
                                    name="debrid[${index}].rate_limit" id="debrid[${index}].rate_limit" 
-                                   placeholder="250/minute" value="250/minute">
+                                   placeholder="5/second" value="5/second">
                             <div class="label">
                                 <span class="label-text-alt">API rate limit for this service</span>
                             </div>
