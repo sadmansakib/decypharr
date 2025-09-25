@@ -28,6 +28,7 @@ type Store struct {
 	downloadSemaphore  chan struct{}
 	removeStalledAfter time.Duration // Duration after which stalled torrents are removed
 	scheduler          gocron.Scheduler
+	cacheWorkersCancel context.CancelFunc // Cancel function for cache workers
 }
 
 var (
@@ -81,6 +82,9 @@ func Get() *Store {
 
 func Reset() {
 	if instance != nil {
+		// Stop workers first
+		instance.StopWorkers()
+
 		if instance.debrid != nil {
 			instance.debrid.Reset()
 		}
@@ -103,6 +107,11 @@ func Reset() {
 		if instance.scheduler != nil {
 			_ = instance.scheduler.StopJobs()
 			_ = instance.scheduler.Shutdown()
+		}
+
+		// Cancel cache workers if still running
+		if instance.cacheWorkersCancel != nil {
+			instance.cacheWorkersCancel()
 		}
 	}
 	once = sync.Once{}

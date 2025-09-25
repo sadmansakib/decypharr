@@ -124,6 +124,7 @@ func (d *Storage) checkBandwidthWorker(ctx context.Context) {
 	}
 	ticker := time.NewTicker(30 * time.Minute)
 	go func() {
+		defer ticker.Stop() // Properly cleanup ticker
 		for {
 			select {
 			case <-ctx.Done():
@@ -159,6 +160,7 @@ func (d *Storage) syncAccountsWorker(ctx context.Context) {
 	_ = d.syncAccounts()
 	ticker := time.NewTicker(5 * time.Minute)
 	go func() {
+		defer ticker.Stop() // Properly cleanup ticker
 		for {
 			select {
 			case <-ctx.Done():
