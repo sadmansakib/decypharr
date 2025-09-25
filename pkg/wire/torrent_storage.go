@@ -186,11 +186,11 @@ func (ts *TorrentStorage) Delete(hash, category string, removeFromDebrid bool) {
 			}
 			delete(ts.torrents, key)
 
-			// Delete the torrent folder
+			// Delete the torrent folder - log error but continue cleanup
 			if torrent.ContentPath != "" {
 				err := os.RemoveAll(torrent.ContentPath)
 				if err != nil {
-					return
+					wireStore.logger.Error().Err(err).Str("path", torrent.ContentPath).Msg("Failed to remove torrent content directory")
 				}
 			}
 			break
@@ -228,7 +228,7 @@ func (ts *TorrentStorage) DeleteMultiple(hashes []string, removeFromDebrid bool)
 				if torrent.ContentPath != "" {
 					err := os.RemoveAll(torrent.ContentPath)
 					if err != nil {
-						return
+						st.logger.Error().Err(err).Str("path", torrent.ContentPath).Msg("Failed to remove torrent content directory")
 					}
 				}
 				break
