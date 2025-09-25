@@ -376,7 +376,7 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 		d.FolderNaming = cmp.Or(c.WebDav.FolderNaming, "original_no_ext")
 	}
 	if d.AutoExpireLinksAfter == "" {
-		d.AutoExpireLinksAfter = cmp.Or(c.WebDav.AutoExpireLinksAfter, "72h") // 72 hours
+		d.AutoExpireLinksAfter = cmp.Or(c.WebDav.AutoExpireLinksAfter, "24h") // 24 hours
 	}
 
 	// Merge debrid specified directories with global directories

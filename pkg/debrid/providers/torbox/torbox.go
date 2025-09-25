@@ -50,16 +50,19 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 	}
 	_log := logger.New(dc.Name)
 
-	// Create endpoint-specific rate limiter for Torbox
-	endpointRL := request.NewEndpointRateLimiter(ratelimits["main"])
-
-	// Set special rate limits for createtorrent endpoint (60/hour + 10/min)
+	// Create endpoint-specific rate limiters for Torbox
 	createTorrentLimiter := request.NewMultiRateLimiter("60/hour", "10/minute")
-	endpointRL.SetEndpointLimiter("/api/torrents/createtorrent", createTorrentLimiter)
+	endpointRateLimiters := []request.EndpointRateLimiter{
+		{
+			Pattern:  "/api/torrents/createtorrent",
+			Limiters: []ratelimit.Limiter{createTorrentLimiter},
+		},
+	}
 
 	client := request.New(
 		request.WithHeaders(headers),
-		request.WithEndpointRateLimiter(endpointRL),
+		request.WithRateLimiter(ratelimits["main"]),
+		request.WithEndpointRateLimiters(endpointRateLimiters),
 		request.WithLogger(_log),
 		request.WithProxy(dc.Proxy),
 	)

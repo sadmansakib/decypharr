@@ -16,9 +16,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,72 +48,141 @@ var (
 	instance *Client
 )
 
+// CircuitBreakerState represents the state of a circuit breaker
+type CircuitBreakerState int32
+
+const (
+	CircuitClosed CircuitBreakerState = iota
+	CircuitOpen
+	CircuitHalfOpen
+)
+
+// CircuitBreakerConfig defines configuration for circuit breaker
+type CircuitBreakerConfig struct {
+	FailureThreshold    int           // Number of consecutive 429s to open circuit
+	RecoveryTimeout     time.Duration // Time before attempting half-open
+	MaxHalfOpenRequests int           // Max requests allowed in half-open state
+}
+
+// CircuitBreaker manages the circuit breaker state for rate limiting
+type CircuitBreaker struct {
+	config           CircuitBreakerConfig
+	state            int32 // CircuitBreakerState (atomic)
+	failureCount     int32 // Consecutive failures (atomic)
+	halfOpenRequests int32 // Requests in half-open state (atomic)
+	lastFailureTime  int64 // Unix timestamp of last failure (atomic)
+	logger           zerolog.Logger
+	mu               sync.RWMutex
+}
+
+// NewCircuitBreaker creates a new circuit breaker
+func NewCircuitBreaker(config CircuitBreakerConfig, logger zerolog.Logger) *CircuitBreaker {
+	return &CircuitBreaker{
+		config: config,
+		state:  int32(CircuitClosed),
+		logger: logger,
+	}
+}
+
+// Allow checks if a request should be allowed through the circuit breaker
+func (cb *CircuitBreaker) Allow() error {
+	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
+
+	switch state {
+	case CircuitClosed:
+		return nil
+	case CircuitOpen:
+		// Check if recovery timeout has passed
+		lastFailure := time.Unix(atomic.LoadInt64(&cb.lastFailureTime), 0)
+		if time.Since(lastFailure) >= cb.config.RecoveryTimeout {
+			// Transition to half-open
+			if atomic.CompareAndSwapInt32(&cb.state, int32(CircuitOpen), int32(CircuitHalfOpen)) {
+				atomic.StoreInt32(&cb.halfOpenRequests, 0)
+				cb.logger.Info().Msg("Circuit breaker transitioning to half-open state")
+			}
+			return nil
+		}
+		return fmt.Errorf("circuit breaker is open - rate limit protection active")
+	case CircuitHalfOpen:
+		// Allow limited requests in half-open state
+		if atomic.LoadInt32(&cb.halfOpenRequests) < int32(cb.config.MaxHalfOpenRequests) {
+			atomic.AddInt32(&cb.halfOpenRequests, 1)
+			return nil
+		}
+		return fmt.Errorf("circuit breaker half-open request limit exceeded")
+	default:
+		return nil
+	}
+}
+
+// RecordSuccess records a successful response
+func (cb *CircuitBreaker) RecordSuccess() {
+	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
+
+	switch state {
+	case CircuitHalfOpen:
+		// Reset to closed state after successful request in half-open
+		if atomic.CompareAndSwapInt32(&cb.state, int32(CircuitHalfOpen), int32(CircuitClosed)) {
+			atomic.StoreInt32(&cb.failureCount, 0)
+			cb.logger.Info().Msg("Circuit breaker closed - service recovered")
+		}
+	case CircuitClosed:
+		// Reset failure count on success
+		atomic.StoreInt32(&cb.failureCount, 0)
+	}
+}
+
+// RecordFailure records a 429 response failure
+func (cb *CircuitBreaker) RecordFailure() {
+	atomic.StoreInt64(&cb.lastFailureTime, time.Now().Unix())
+	failures := atomic.AddInt32(&cb.failureCount, 1)
+
+	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
+
+	switch state {
+	case CircuitClosed:
+		if failures >= int32(cb.config.FailureThreshold) {
+			if atomic.CompareAndSwapInt32(&cb.state, int32(CircuitClosed), int32(CircuitOpen)) {
+				cb.logger.Warn().Int32("failures", failures).Msg("Circuit breaker opened due to rate limit violations")
+			}
+		}
+	case CircuitHalfOpen:
+		// Immediately return to open state on failure during half-open
+		if atomic.CompareAndSwapInt32(&cb.state, int32(CircuitHalfOpen), int32(CircuitOpen)) {
+			cb.logger.Warn().Msg("Circuit breaker reopened - service still rate limiting")
+		}
+	}
+}
+
 // RateLimiter interface for different types of rate limiters
 type RateLimiter interface {
 	Take() time.Time
 }
 
-// EndpointRateLimiter manages different rate limiters for different endpoints
+// EndpointRateLimiter represents a rate limiter for a specific endpoint pattern
 type EndpointRateLimiter struct {
-	defaultLimiter RateLimiter
-	endpointLimiters map[string]RateLimiter
-	mu sync.RWMutex
-}
-
-// NewEndpointRateLimiter creates a new endpoint-aware rate limiter
-func NewEndpointRateLimiter(defaultLimiter RateLimiter) *EndpointRateLimiter {
-	return &EndpointRateLimiter{
-		defaultLimiter: defaultLimiter,
-		endpointLimiters: make(map[string]RateLimiter),
-	}
-}
-
-// SetEndpointLimiter sets a specific rate limiter for an endpoint pattern
-func (e *EndpointRateLimiter) SetEndpointLimiter(endpointPattern string, limiter RateLimiter) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.endpointLimiters[endpointPattern] = limiter
-}
-
-// Take finds the appropriate rate limiter for the given URL and applies rate limiting
-func (e *EndpointRateLimiter) Take(url string) time.Time {
-	if e == nil {
-		return time.Now()
-	}
-
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	// Check for endpoint-specific rate limiters
-	for pattern, limiter := range e.endpointLimiters {
-		if strings.Contains(url, pattern) {
-			return limiter.Take()
-		}
-	}
-
-	// Fall back to default rate limiter
-	if e.defaultLimiter != nil {
-		return e.defaultLimiter.Take()
-	}
-
-	return time.Now()
+	Pattern    string              // URL pattern to match (supports simple string matching or regex)
+	Limiters   []ratelimit.Limiter // Multiple rate limiters (e.g., hourly + per-minute)
+	IsRegex    bool                // Whether pattern is a regex
+	CompiledRx *regexp.Regexp      // Compiled regex if IsRegex is true
 }
 
 type ClientOption func(*Client)
 
 // Client represents an HTTP client with additional capabilities
 type Client struct {
-	client              *http.Client
-	rateLimiter         ratelimit.Limiter
-	endpointRateLimiter *EndpointRateLimiter
-	headers             map[string]string
-	headersMu           sync.RWMutex
-	maxRetries          int
-	timeout             time.Duration
-	skipTLSVerify       bool
-	retryableStatus     map[int]struct{}
-	logger              zerolog.Logger
-	proxy               string
+	client               *http.Client
+	rateLimiter          ratelimit.Limiter
+	endpointRateLimiters []EndpointRateLimiter // Per-endpoint rate limiters
+	circuitBreaker       *CircuitBreaker       // Circuit breaker for 429 responses
+	headers              map[string]string
+	headersMu            sync.RWMutex
+	maxRetries           int
+	timeout              time.Duration
+	skipTLSVerify        bool
+	retryableStatus      map[int]struct{}
+	logger               zerolog.Logger
+	proxy                string
 }
 
 // WithMaxRetries sets the maximum number of retry attempts
@@ -141,10 +212,29 @@ func WithRateLimiter(rl ratelimit.Limiter) ClientOption {
 	}
 }
 
-// WithEndpointRateLimiter sets an endpoint-aware rate limiter
-func WithEndpointRateLimiter(erl *EndpointRateLimiter) ClientOption {
+// WithEndpointRateLimiters sets per-endpoint rate limiters
+// This allows different rate limiters for specific URL patterns
+func WithEndpointRateLimiters(limiters []EndpointRateLimiter) ClientOption {
 	return func(c *Client) {
-		c.endpointRateLimiter = erl
+		// Compile regex patterns
+		for i := range limiters {
+			if limiters[i].IsRegex {
+				compiled, err := regexp.Compile(limiters[i].Pattern)
+				if err != nil {
+					c.logger.Error().Err(err).Msgf("Failed to compile regex pattern: %s", limiters[i].Pattern)
+					continue
+				}
+				limiters[i].CompiledRx = compiled
+			}
+		}
+		c.endpointRateLimiters = limiters
+	}
+}
+
+// WithCircuitBreaker sets a circuit breaker for 429 response handling
+func WithCircuitBreaker(config CircuitBreakerConfig) ClientOption {
+	return func(c *Client) {
+		c.circuitBreaker = NewCircuitBreaker(config, c.logger)
 	}
 }
 
@@ -191,18 +281,22 @@ func WithProxy(proxyURL string) ClientOption {
 	}
 }
 
-// doRequest performs a single HTTP request with rate limiting
+// doRequest performs a single HTTP request with rate limiting and circuit breaker
 func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
-	// Apply endpoint-specific rate limiting first
-	if c.endpointRateLimiter != nil {
-		select {
-		case <-req.Context().Done():
-			return nil, req.Context().Err()
-		default:
-			c.endpointRateLimiter.Take(req.URL.String())
+	// Check circuit breaker first
+	if c.circuitBreaker != nil {
+		if err := c.circuitBreaker.Allow(); err != nil {
+			return nil, err
 		}
-	} else if c.rateLimiter != nil {
-		// Fall back to general rate limiter
+	}
+
+	// Apply endpoint-specific rate limiting first
+	if len(c.endpointRateLimiters) > 0 {
+		c.applyEndpointRateLimit(req)
+	}
+
+	// Apply general rate limiting
+	if c.rateLimiter != nil {
 		select {
 		case <-req.Context().Done():
 			return nil, req.Context().Err()
@@ -212,6 +306,38 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	}
 
 	return c.client.Do(req)
+}
+
+// applyEndpointRateLimit applies rate limiting based on the request URL
+func (c *Client) applyEndpointRateLimit(req *http.Request) {
+	requestURL := req.URL.String()
+
+	for _, limiter := range c.endpointRateLimiters {
+		matched := false
+
+		if limiter.IsRegex && limiter.CompiledRx != nil {
+			matched = limiter.CompiledRx.MatchString(requestURL)
+		} else {
+			// Simple string matching
+			matched = strings.Contains(requestURL, limiter.Pattern)
+		}
+
+		if matched {
+			// Apply all rate limiters for this endpoint (e.g., hourly + per-minute)
+			for _, rl := range limiter.Limiters {
+				if rl != nil {
+					select {
+					case <-req.Context().Done():
+						return
+					default:
+						rl.Take()
+					}
+				}
+			}
+			// Only apply the first matching pattern
+			return
+		}
+	}
 }
 
 // Do performs an HTTP request with retries for certain status codes
@@ -266,6 +392,16 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				continue
 			}
 			return nil, err
+		}
+
+		// Record circuit breaker state based on response
+		if c.circuitBreaker != nil {
+			if resp.StatusCode == http.StatusTooManyRequests {
+				c.circuitBreaker.RecordFailure()
+				c.logger.Warn().Int("status", resp.StatusCode).Str("url", req.URL.String()).Msg("Rate limit violation detected")
+			} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				c.circuitBreaker.RecordSuccess()
+			}
 		}
 
 		// Check if the status code is retryable

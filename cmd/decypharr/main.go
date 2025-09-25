@@ -78,15 +78,6 @@ func Start(ctx context.Context) error {
 		reset := func() {
 			_log.Debug().Msg("Resetting services and store...")
 
-			// Gracefully shutdown services with timeout
-			resetCtx, resetCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer resetCancel()
-
-			// Stop WebDAV handlers
-			if err := wd.Stop(); err != nil {
-				_log.Error().Err(err).Msg("Error stopping WebDAV service")
-			}
-
 			// Reset QBit service
 			qb.Reset()
 
