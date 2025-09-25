@@ -46,20 +46,72 @@ var (
 	instance *Client
 )
 
+// RateLimiter interface for different types of rate limiters
+type RateLimiter interface {
+	Take() time.Time
+}
+
+// EndpointRateLimiter manages different rate limiters for different endpoints
+type EndpointRateLimiter struct {
+	defaultLimiter RateLimiter
+	endpointLimiters map[string]RateLimiter
+	mu sync.RWMutex
+}
+
+// NewEndpointRateLimiter creates a new endpoint-aware rate limiter
+func NewEndpointRateLimiter(defaultLimiter RateLimiter) *EndpointRateLimiter {
+	return &EndpointRateLimiter{
+		defaultLimiter: defaultLimiter,
+		endpointLimiters: make(map[string]RateLimiter),
+	}
+}
+
+// SetEndpointLimiter sets a specific rate limiter for an endpoint pattern
+func (e *EndpointRateLimiter) SetEndpointLimiter(endpointPattern string, limiter RateLimiter) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.endpointLimiters[endpointPattern] = limiter
+}
+
+// Take finds the appropriate rate limiter for the given URL and applies rate limiting
+func (e *EndpointRateLimiter) Take(url string) time.Time {
+	if e == nil {
+		return time.Now()
+	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	// Check for endpoint-specific rate limiters
+	for pattern, limiter := range e.endpointLimiters {
+		if strings.Contains(url, pattern) {
+			return limiter.Take()
+		}
+	}
+
+	// Fall back to default rate limiter
+	if e.defaultLimiter != nil {
+		return e.defaultLimiter.Take()
+	}
+
+	return time.Now()
+}
+
 type ClientOption func(*Client)
 
 // Client represents an HTTP client with additional capabilities
 type Client struct {
-	client          *http.Client
-	rateLimiter     ratelimit.Limiter
-	headers         map[string]string
-	headersMu       sync.RWMutex
-	maxRetries      int
-	timeout         time.Duration
-	skipTLSVerify   bool
-	retryableStatus map[int]struct{}
-	logger          zerolog.Logger
-	proxy           string
+	client              *http.Client
+	rateLimiter         ratelimit.Limiter
+	endpointRateLimiter *EndpointRateLimiter
+	headers             map[string]string
+	headersMu           sync.RWMutex
+	maxRetries          int
+	timeout             time.Duration
+	skipTLSVerify       bool
+	retryableStatus     map[int]struct{}
+	logger              zerolog.Logger
+	proxy               string
 }
 
 // WithMaxRetries sets the maximum number of retry attempts
@@ -86,6 +138,13 @@ func WithRedirectPolicy(policy func(req *http.Request, via []*http.Request) erro
 func WithRateLimiter(rl ratelimit.Limiter) ClientOption {
 	return func(c *Client) {
 		c.rateLimiter = rl
+	}
+}
+
+// WithEndpointRateLimiter sets an endpoint-aware rate limiter
+func WithEndpointRateLimiter(erl *EndpointRateLimiter) ClientOption {
+	return func(c *Client) {
+		c.endpointRateLimiter = erl
 	}
 }
 
@@ -134,7 +193,16 @@ func WithProxy(proxyURL string) ClientOption {
 
 // doRequest performs a single HTTP request with rate limiting
 func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
-	if c.rateLimiter != nil {
+	// Apply endpoint-specific rate limiting first
+	if c.endpointRateLimiter != nil {
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		default:
+			c.endpointRateLimiter.Take(req.URL.String())
+		}
+	} else if c.rateLimiter != nil {
+		// Fall back to general rate limiter
 		select {
 		case <-req.Context().Done():
 			return nil, req.Context().Err()
@@ -305,6 +373,44 @@ func New(options ...ClientOption) *Client {
 	}
 
 	return client
+}
+
+// MultiRateLimiter combines multiple rate limiters that must all be satisfied
+type MultiRateLimiter struct {
+	limiters []ratelimit.Limiter
+}
+
+// Ensure MultiRateLimiter implements RateLimiter interface
+var _ RateLimiter = (*MultiRateLimiter)(nil)
+
+// NewMultiRateLimiter creates a new multi-rate limiter with the given rate limit strings
+func NewMultiRateLimiter(rateLimitStrs ...string) *MultiRateLimiter {
+	var limiters []ratelimit.Limiter
+	for _, rateStr := range rateLimitStrs {
+		if limiter := ParseRateLimit(rateStr); limiter != nil {
+			limiters = append(limiters, limiter)
+		}
+	}
+	if len(limiters) == 0 {
+		return nil
+	}
+	return &MultiRateLimiter{limiters: limiters}
+}
+
+// Take blocks until all rate limiters allow a request
+func (m *MultiRateLimiter) Take() time.Time {
+	if m == nil || len(m.limiters) == 0 {
+		return time.Now()
+	}
+
+	var latestTime time.Time
+	for _, limiter := range m.limiters {
+		t := limiter.Take()
+		if t.After(latestTime) {
+			latestTime = t
+		}
+	}
+	return latestTime
 }
 
 func ParseRateLimit(rateStr string) ratelimit.Limiter {
