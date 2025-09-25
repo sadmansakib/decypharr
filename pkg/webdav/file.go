@@ -241,6 +241,38 @@ func (f *File) handleUpstreamError(downloadLink types.DownloadLink, resp *http.R
 	}
 
 	switch resp.StatusCode {
+	case http.StatusBadRequest:
+		// Read the body to check for specific error messages
+		body, readErr := io.ReadAll(resp.Body)
+		cleanupResp(resp)
+
+		if readErr != nil {
+			_log.Error().Err(readErr).Msg("Failed to read response body")
+			return noRetry, &streamError{
+				Err:        fmt.Errorf("failed to read error response: %w", readErr),
+				StatusCode: http.StatusBadRequest,
+			}
+		}
+
+		bodyStr := string(body)
+		// Check for Torbox-specific presigned token errors
+		if strings.Contains(bodyStr, "Invalid Presigned Token") ||
+		   strings.Contains(bodyStr, "This link is invalid") ||
+		   strings.Contains(bodyStr, "Please get a new download link") {
+			_log.Debug().
+				Str("file", f.name).
+				Msg("Invalid presigned token detected. Marking link as invalid")
+
+			f.cache.MarkDownloadLinkAsInvalid(f.downloadLink, "invalid_presigned_token")
+			f.downloadLink = types.DownloadLink{}
+			return retryAlways, nil
+		}
+
+		return noRetry, &streamError{
+			Err:        fmt.Errorf("bad request: %s", bodyStr),
+			StatusCode: http.StatusBadRequest,
+		}
+
 	case http.StatusServiceUnavailable:
 		body, readErr := io.ReadAll(resp.Body)
 		cleanupResp(resp)
