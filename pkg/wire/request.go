@@ -94,7 +94,11 @@ func (i *ImportRequest) sendCallback(torrent *Torrent, debridTorrent *debridType
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	_, _ = client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 
 }
 

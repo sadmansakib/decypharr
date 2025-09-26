@@ -345,10 +345,12 @@ func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
 		// Handle multiple_downloads
 
 		if resp.StatusCode == 509 {
+			resp.Body.Close()
 			return nil, utils.TooManyActiveDownloadsError
 		}
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		return nil, fmt.Errorf("realdebrid API error: Status: %d || Body: %s", resp.StatusCode, string(bodyBytes))
 	}
 	defer func(Body io.ReadCloser) {
@@ -383,10 +385,12 @@ func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 		// Handle multiple_downloads
 
 		if resp.StatusCode == 509 {
+			resp.Body.Close()
 			return nil, utils.TooManyActiveDownloadsError
 		}
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		return nil, fmt.Errorf("realdebrid API error: Status: %d || Body: %s", resp.StatusCode, string(bodyBytes))
 	}
 	defer resp.Body.Close()
@@ -532,6 +536,7 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 			if err != nil {
 				return t, err
 			}
+			defer res.Body.Close()
 			if res.StatusCode != http.StatusNoContent {
 				if res.StatusCode == 509 {
 					return nil, utils.TooManyActiveDownloadsError
@@ -749,6 +754,7 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, 
 	}
 
 	if resp.StatusCode == http.StatusNoContent {
+		resp.Body.Close()
 		return 0, torrents, nil
 	}
 

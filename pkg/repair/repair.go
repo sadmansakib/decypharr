@@ -254,9 +254,10 @@ func (r *Repair) preRunChecks() error {
 		r.logger.Error().Err(err).Msgf("Precheck failed: Failed to reach zurg at %s", r.ZurgURL)
 		return err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		r.logger.Debug().Msgf("Precheck failed: Zurg returned %d", resp.StatusCode)
-		return err
+		return fmt.Errorf("zurg returned status %d", resp.StatusCode)
 	}
 	return nil
 }
