@@ -29,6 +29,7 @@ import (
 
 type Repair struct {
 	Jobs        map[string]*Job
+	jobsMu      sync.RWMutex     // Protects Jobs map from concurrent access
 	arrs        *arr.Storage
 	deb         *debrid.Storage
 	interval    string
@@ -114,7 +115,9 @@ func (r *Repair) Reset() {
 		}
 	}
 	// Reset jobs
+	r.jobsMu.Lock()
 	r.Jobs = make(map[string]*Job)
+	r.jobsMu.Unlock()
 
 }
 
@@ -264,8 +267,11 @@ func (r *Repair) preRunChecks() error {
 
 func (r *Repair) AddJob(arrsNames []string, mediaIDs []string, autoProcess, recurrent bool) error {
 	key := jobKey(arrsNames, mediaIDs)
+
+	r.jobsMu.Lock()
 	job, ok := r.Jobs[key]
 	if job != nil && job.Status == JobStarted {
+		r.jobsMu.Unlock()
 		return fmt.Errorf("job already running")
 	}
 	if !ok {
@@ -277,6 +283,7 @@ func (r *Repair) AddJob(arrsNames []string, mediaIDs []string, autoProcess, recu
 
 	job.ctx, job.cancelFunc = context.WithCancel(r.ctx)
 	r.Jobs[key] = job
+	r.jobsMu.Unlock()
 	go r.saveToFile()
 	go func() {
 		if err := r.repair(job); err != nil {
@@ -694,6 +701,8 @@ func (r *Repair) getWebdavBrokenFiles(job *Job, media arr.Content) []arr.Content
 }
 
 func (r *Repair) GetJob(id string) *Job {
+	r.jobsMu.RLock()
+	defer r.jobsMu.RUnlock()
 	for _, job := range r.Jobs {
 		if job.ID == id {
 			return job
@@ -703,7 +712,9 @@ func (r *Repair) GetJob(id string) *Job {
 }
 
 func (r *Repair) GetJobs() []*Job {
-	jobs := make([]*Job, 0)
+	r.jobsMu.RLock()
+	defer r.jobsMu.RUnlock()
+	jobs := make([]*Job, 0, len(r.Jobs))
 	for _, job := range r.Jobs {
 		jobs = append(jobs, job)
 	}
@@ -803,9 +814,12 @@ func (r *Repair) ProcessJob(id string) error {
 
 func (r *Repair) saveToFile() {
 	// Save jobs to file
+	r.jobsMu.RLock()
 	data, err := json.Marshal(r.Jobs)
+	r.jobsMu.RUnlock()
 	if err != nil {
 		r.logger.Error().Err(err).Msg("Failed to marshal jobs")
+		return
 	}
 	_ = os.WriteFile(r.filename, data, 0644)
 }
@@ -813,14 +827,18 @@ func (r *Repair) saveToFile() {
 func (r *Repair) loadFromFile() {
 	data, err := os.ReadFile(r.filename)
 	if err != nil && os.IsNotExist(err) {
+		r.jobsMu.Lock()
 		r.Jobs = make(map[string]*Job)
+		r.jobsMu.Unlock()
 		return
 	}
 	_jobs := make(map[string]*Job)
 	err = json.Unmarshal(data, &_jobs)
 	if err != nil {
 		r.logger.Error().Err(err).Msg("Failed to unmarshal jobs; resetting")
+		r.jobsMu.Lock()
 		r.Jobs = make(map[string]*Job)
+		r.jobsMu.Unlock()
 		return
 	}
 	jobs := make(map[string]*Job)
@@ -831,10 +849,14 @@ func (r *Repair) loadFromFile() {
 		}
 		jobs[k] = v
 	}
+	r.jobsMu.Lock()
 	r.Jobs = jobs
+	r.jobsMu.Unlock()
 }
 
 func (r *Repair) DeleteJobs(ids []string) {
+	r.jobsMu.Lock()
+	defer r.jobsMu.Unlock()
 	for _, id := range ids {
 		if id == "" {
 			continue
@@ -850,7 +872,9 @@ func (r *Repair) DeleteJobs(ids []string) {
 
 // Cleanup Cleans up the repair instance
 func (r *Repair) Cleanup() {
+	r.jobsMu.Lock()
 	r.Jobs = make(map[string]*Job)
+	r.jobsMu.Unlock()
 	r.arrs = nil
 	r.deb = nil
 	r.ctx = nil

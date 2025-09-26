@@ -25,6 +25,7 @@ var (
 	instance   *Config
 	once       sync.Once
 	configPath string
+	instanceMu sync.RWMutex
 )
 
 type Debrid struct {
@@ -46,6 +47,17 @@ type Debrid struct {
 
 	UseWebDav bool `json:"use_webdav,omitempty"`
 	WebDav
+
+	// WebDAV-specific fields embedded from WebDav struct to avoid access issues
+	TorrentsRefreshInterval      string                       `json:"torrents_refresh_interval,omitempty"`
+	DownloadLinksRefreshInterval string                       `json:"download_links_refresh_interval,omitempty"`
+	Workers                      int                          `json:"workers,omitempty"`
+	AutoExpireLinksAfter         string                       `json:"auto_expire_links_after,omitempty"`
+	FolderNaming                 string                       `json:"folder_naming,omitempty"`
+	Directories                  map[string]WebdavDirectories `json:"directories,omitempty"`
+	RcUrl                        string                       `json:"rc_url,omitempty"`
+	RcUser                       string                       `json:"rc_user,omitempty"`
+	RcPass                       string                       `json:"rc_pass,omitempty"`
 }
 
 type QBitTorrent struct {
@@ -261,13 +273,28 @@ func SetConfigPath(path string) {
 }
 
 func Get() *Config {
-	once.Do(func() {
-		instance = &Config{} // Initialize instance first
-		if err := instance.loadConfig(); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "configuration Error: %v\n", err)
-			os.Exit(1)
-		}
-	})
+	instanceMu.RLock()
+	if instance != nil {
+		defer instanceMu.RUnlock()
+		return instance
+	}
+	instanceMu.RUnlock()
+
+	// Need to initialize, acquire write lock
+	instanceMu.Lock()
+	defer instanceMu.Unlock()
+
+	// Double-check pattern: another goroutine might have initialized while we waited
+	if instance != nil {
+		return instance
+	}
+
+	// Initialize the instance
+	instance = &Config{}
+	if err := instance.loadConfig(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "configuration Error: %v\n", err)
+		os.Exit(1)
+	}
 	return instance
 }
 
@@ -507,8 +534,11 @@ func (c *Config) createConfig(path string) error {
 
 // Reload forces a reload of the configuration from disk
 func Reload() {
+	instanceMu.Lock()
+	defer instanceMu.Unlock()
+
+	// Reset the instance to force reload on next Get() call
 	instance = nil
-	once = sync.Once{}
 }
 
 func DefaultFreeSlot() int {

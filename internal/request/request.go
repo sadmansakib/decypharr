@@ -278,6 +278,7 @@ type Client struct {
 	timeout              time.Duration
 	skipTLSVerify        bool
 	retryableStatus      map[int]struct{}
+	retryableStatusMu    sync.RWMutex // Protects retryableStatus map from concurrent access
 	logger               zerolog.Logger
 	proxy                string
 }
@@ -365,10 +366,12 @@ func WithTransport(transport *http.Transport) ClientOption {
 // WithRetryableStatus adds status codes that should trigger a retry
 func WithRetryableStatus(statusCodes ...int) ClientOption {
 	return func(c *Client) {
+		c.retryableStatusMu.Lock()
 		c.retryableStatus = make(map[int]struct{}) // reset the map
 		for _, code := range statusCodes {
 			c.retryableStatus[code] = struct{}{}
 		}
+		c.retryableStatusMu.Unlock()
 	}
 }
 
@@ -502,7 +505,10 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		}
 
 		// Check if the status code is retryable
-		if _, ok := c.retryableStatus[resp.StatusCode]; !ok || attempt == c.maxRetries {
+		c.retryableStatusMu.RLock()
+		_, isRetryable := c.retryableStatus[resp.StatusCode]
+		c.retryableStatusMu.RUnlock()
+		if !isRetryable || attempt == c.maxRetries {
 			return resp, nil
 		}
 
