@@ -146,6 +146,12 @@ func Start(ctx context.Context) error {
 func startServices(ctx context.Context, cancelSvc context.CancelFunc, wd *webdav.WebDav, srv *server.Server) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, 10) // Buffered to prevent blocking
+	var errChanClosed bool
+	var errChanMutex sync.Mutex
+
+	// Create a context for goroutine lifecycle management
+	goroutineCtx, cancelGoroutines := context.WithCancel(ctx)
+	defer cancelGoroutines() // Ensure all goroutines are cancelled on function exit
 
 	_log := logger.Default()
 
@@ -165,11 +171,16 @@ func startServices(ctx context.Context, cancelSvc context.CancelFunc, wd *webdav
 
 					// Send error to channel so the main goroutine is aware
 					if ctx.Err() == nil { // Only send error if not shutting down
-						select {
-						case errChan <- fmt.Errorf("service %s panic: %v", serviceName, r):
-						default:
-							_log.Error().Str("service", serviceName).Msg("Error channel full, panic not reported")
+						// Check if channel is still open before sending
+						errChanMutex.Lock()
+						if !errChanClosed {
+							select {
+							case errChan <- fmt.Errorf("service %s panic: %v", serviceName, r):
+							default:
+								_log.Error().Str("service", serviceName).Msg("Error channel full, panic not reported")
+							}
 						}
+						errChanMutex.Unlock()
 					}
 				}
 			}()
@@ -177,12 +188,17 @@ func startServices(ctx context.Context, cancelSvc context.CancelFunc, wd *webdav
 			_log.Debug().Str("service", serviceName).Msg("Starting service")
 			if err := f(); err != nil && ctx.Err() == nil {
 				_log.Error().Err(err).Str("service", serviceName).Msg("Service error")
-				select {
-				case errChan <- fmt.Errorf("service %s error: %w", serviceName, err):
-				default:
-					// Channel full, log but don't block
-					_log.Error().Str("service", serviceName).Msg("Error channel full, error not reported")
+				// Check if channel is still open before sending
+				errChanMutex.Lock()
+				if !errChanClosed {
+					select {
+					case errChan <- fmt.Errorf("service %s error: %w", serviceName, err):
+					default:
+						// Channel full, log but don't block
+						_log.Error().Str("service", serviceName).Msg("Error channel full, error not reported")
+					}
 				}
+				errChanMutex.Unlock()
 			} else if ctx.Err() != nil {
 				_log.Debug().Str("service", serviceName).Msg("Service stopped due to context cancellation")
 			} else {
@@ -226,23 +242,72 @@ func startServices(ctx context.Context, cancelSvc context.CancelFunc, wd *webdav
 		return nil
 	})
 
-	// Monitor service completion
+	// Monitor service completion with proper cancellation
 	go func() {
-		wg.Wait()
-		_log.Debug().Msg("All services have finished")
-		close(errChan)
+		defer func() {
+			if r := recover(); r != nil {
+				_log.Error().Interface("panic", r).Msg("Panic in service monitor goroutine")
+			}
+		}()
+
+		// Use a channel to signal when all services are done
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			wg.Wait()
+		}()
+
+		select {
+		case <-done:
+			_log.Debug().Msg("All services have finished")
+			// Safely close errChan
+			errChanMutex.Lock()
+			if !errChanClosed {
+				close(errChan)
+				errChanClosed = true
+			}
+			errChanMutex.Unlock()
+		case <-goroutineCtx.Done():
+			_log.Debug().Msg("Service monitor goroutine cancelled")
+			// Safely close errChan to signal error handler to exit
+			errChanMutex.Lock()
+			if !errChanClosed {
+				close(errChan)
+				errChanClosed = true
+			}
+			errChanMutex.Unlock()
+			return
+		}
 	}()
 
-	// Handle service errors
+	// Handle service errors with proper cancellation
 	go func() {
-		for err := range errChan {
-			if err != nil {
-				_log.Error().Err(err).Msg("Service error detected")
-				// Only trigger shutdown if context is still active (not already shutting down)
-				if ctx.Err() == nil {
-					_log.Error().Msg("Initiating service shutdown due to critical error")
-					cancelSvc() // Cancel the service context to stop all services
+		defer func() {
+			if r := recover(); r != nil {
+				_log.Error().Interface("panic", r).Msg("Panic in error handler goroutine")
+			}
+			_log.Debug().Msg("Error handler goroutine exiting")
+		}()
+
+		for {
+			select {
+			case err, ok := <-errChan:
+				if !ok {
+					// Channel closed, exit gracefully
+					_log.Debug().Msg("Error channel closed, error handler exiting")
+					return
 				}
+				if err != nil {
+					_log.Error().Err(err).Msg("Service error detected")
+					// Only trigger shutdown if context is still active (not already shutting down)
+					if ctx.Err() == nil {
+						_log.Error().Msg("Initiating service shutdown due to critical error")
+						cancelSvc() // Cancel the service context to stop all services
+					}
+				}
+			case <-goroutineCtx.Done():
+				_log.Debug().Msg("Error handler goroutine cancelled")
+				return
 			}
 		}
 	}()
@@ -253,14 +318,17 @@ func startServices(ctx context.Context, cancelSvc context.CancelFunc, wd *webdav
 	<-ctx.Done()
 	_log.Info().Msg("Shutdown signal received, stopping services...")
 
+	// Cancel all goroutines before waiting for services to stop
+	cancelGoroutines()
+
 	// Give services a moment to stop gracefully
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		wg.Wait()
-		close(done)
 	}()
 
 	select {
@@ -268,6 +336,13 @@ func startServices(ctx context.Context, cancelSvc context.CancelFunc, wd *webdav
 		_log.Info().Msg("All services stopped gracefully")
 	case <-shutdownCtx.Done():
 		_log.Warn().Msg("Service shutdown timeout reached")
+		// Force close errChan if it's still open to ensure error handler exits
+		errChanMutex.Lock()
+		if !errChanClosed {
+			close(errChan)
+			errChanClosed = true
+		}
+		errChanMutex.Unlock()
 	}
 
 	return ctx.Err()
