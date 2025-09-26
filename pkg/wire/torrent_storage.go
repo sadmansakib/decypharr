@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 func keyPair(hash, category string) string {
@@ -24,6 +26,11 @@ type TorrentStorage struct {
 	writerCtx    context.Context
 	writerCancel context.CancelFunc
 	writerDone   chan struct{}
+
+	// Worker pools for bounded concurrency
+	fileOpSem    *semaphore.Weighted // Semaphore for file operations
+	notificationSem *semaphore.Weighted // Semaphore for async operations
+	fileOpPool   chan struct{}       // Worker pool for file operations
 }
 
 // saveRequest represents a request to save the current state to file
@@ -60,6 +67,11 @@ func newTorrentStorage(filename string) *TorrentStorage {
 		writerCtx:    ctx,
 		writerCancel: cancel,
 		writerDone:   make(chan struct{}),
+
+		// Initialize worker pools with bounded concurrency
+		fileOpSem:       semaphore.NewWeighted(5),  // Limit file operations to 5 concurrent
+		notificationSem: semaphore.NewWeighted(10), // Limit async operations to 10 concurrent
+		fileOpPool:      make(chan struct{}, 3),    // Pool for cleanup operations
 	}
 
 	// Start the dedicated writer goroutine
@@ -125,7 +137,18 @@ func (ts *TorrentStorage) requestSaveAsync() {
 	select {
 	case ts.saveCh <- req:
 		// Don't wait for completion, but handle the response to prevent goroutine leak
+		// Use semaphore to limit concurrent goroutines
 		go func() {
+			ctx, cancel := context.WithTimeout(ts.writerCtx, 5*time.Minute)
+			defer cancel()
+
+			if err := ts.notificationSem.Acquire(ctx, 1); err != nil {
+				// If we can't acquire semaphore, log and return
+				fmt.Printf("Failed to acquire semaphore for async save: %v\n", err)
+				return
+			}
+			defer ts.notificationSem.Release(1)
+
 			err := <-req.response
 			if err != nil {
 				fmt.Printf("Async save error: %v\n", err)
@@ -137,6 +160,29 @@ func (ts *TorrentStorage) requestSaveAsync() {
 		// Channel is full, drop the save request to prevent blocking
 		// This is acceptable since we only need the latest state persisted
 	}
+}
+
+// scheduleFileCleanup schedules file cleanup operations with bounded concurrency
+func (ts *TorrentStorage) scheduleFileCleanup(path string, wireStore *Store) {
+	go func() {
+		ctx, cancel := context.WithTimeout(ts.writerCtx, 2*time.Minute)
+		defer cancel()
+
+		// Use worker pool to limit concurrent file operations
+		select {
+		case ts.fileOpPool <- struct{}{}:
+			defer func() { <-ts.fileOpPool }()
+		case <-ctx.Done():
+			wireStore.logger.Warn().Str("path", path).Msg("File cleanup cancelled due to timeout")
+			return
+		}
+
+		if err := os.RemoveAll(path); err != nil {
+			wireStore.logger.Error().Err(err).Str("path", path).Msg("Failed to remove torrent content directory")
+		} else {
+			wireStore.logger.Debug().Str("path", path).Msg("Successfully removed torrent content directory")
+		}
+	}()
 }
 
 // Close gracefully shuts down the TorrentStorage
@@ -281,12 +327,9 @@ func (ts *TorrentStorage) Delete(hash, category string, removeFromDebrid bool) {
 			}
 			delete(ts.torrents, key)
 
-			// Delete the torrent folder - log error but continue cleanup
+			// Delete the torrent folder with bounded concurrency
 			if torrent.ContentPath != "" {
-				err := os.RemoveAll(torrent.ContentPath)
-				if err != nil {
-					wireStore.logger.Error().Err(err).Str("path", torrent.ContentPath).Msg("Failed to remove torrent content directory")
-				}
+				ts.scheduleFileCleanup(torrent.ContentPath, wireStore)
 			}
 			break
 		}
@@ -318,10 +361,7 @@ func (ts *TorrentStorage) DeleteMultiple(hashes []string, removeFromDebrid bool)
 				}
 				delete(ts.torrents, key)
 				if torrent.ContentPath != "" {
-					err := os.RemoveAll(torrent.ContentPath)
-					if err != nil {
-						st.logger.Error().Err(err).Str("path", torrent.ContentPath).Msg("Failed to remove torrent content directory")
-					}
+					ts.scheduleFileCleanup(torrent.ContentPath, st)
 				}
 				break
 			}
@@ -333,8 +373,24 @@ func (ts *TorrentStorage) DeleteMultiple(hashes []string, removeFromDebrid bool)
 
 	clients := st.debrid.Clients()
 
+	// Use bounded worker pool for debrid deletions
 	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		if err := ts.fileOpSem.Acquire(ctx, 1); err != nil {
+			fmt.Printf("Failed to acquire semaphore for debrid cleanup: %v\n", err)
+			return
+		}
+		defer ts.fileOpSem.Release(1)
+
 		for id, debrid := range toDelete {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			dbClient, ok := clients[debrid]
 			if !ok {
 				continue

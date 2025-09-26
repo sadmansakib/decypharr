@@ -15,6 +15,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/debrid"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 	"net"
 	"net/http"
 	"net/url"
@@ -45,6 +46,10 @@ type Repair struct {
 	debridPathCache sync.Map // debridPath:debridName cache.Emptied after each run
 	torrentsMap     sync.Map //debridName: map[string]*store.CacheTorrent. Emptied after each run
 	ctx             context.Context
+
+	// Bounded concurrency controls
+	notificationSem *semaphore.Weighted // Limits concurrent Discord notifications
+	fileSaveSem     *semaphore.Weighted // Limits concurrent file save operations
 }
 
 type JobStatus string
@@ -93,6 +98,10 @@ func New(arrs *arr.Storage, engine *debrid.Storage) *Repair {
 		deb:         engine,
 		workers:     workers,
 		ctx:         context.Background(),
+
+		// Initialize bounded concurrency controls
+		notificationSem: semaphore.NewWeighted(3), // Limit Discord notifications to 3 concurrent
+		fileSaveSem:     semaphore.NewWeighted(1), // Serialize file save operations
 	}
 	if r.ZurgURL != "" {
 		r.IsZurg = true
@@ -284,7 +293,7 @@ func (r *Repair) AddJob(arrsNames []string, mediaIDs []string, autoProcess, recu
 	job.ctx, job.cancelFunc = context.WithCancel(r.ctx)
 	r.Jobs[key] = job
 	r.jobsMu.Unlock()
-	go r.saveToFile()
+	r.scheduleAsyncSave()
 	go func() {
 		if err := r.repair(job); err != nil {
 			r.logger.Error().Err(err).Msg("Error running repair")
@@ -327,7 +336,7 @@ func (r *Repair) StopJob(id string) error {
 				job.ctx = nil // Clear context to prevent further processing
 				job.CompletedAt = time.Now()
 				job.Error = "Job was cancelled by user"
-				r.saveToFile()
+				r.scheduleAsyncSave()
 			}
 		}()
 
@@ -404,11 +413,7 @@ func (r *Repair) repair(job *Job) error {
 		job.Error = err.Error()
 		job.Status = JobFailed
 		job.CompletedAt = time.Now()
-		go func() {
-			if err := request.SendDiscordMessage("repair_failed", "error", job.discordContext()); err != nil {
-				r.logger.Error().Msgf("Error sending discord message: %v", err)
-			}
-		}()
+		r.sendDiscordNotification("repair_failed", "error", job.discordContext())
 		return err
 	}
 
@@ -416,11 +421,7 @@ func (r *Repair) repair(job *Job) error {
 		job.CompletedAt = time.Now()
 		job.Status = JobCompleted
 
-		go func() {
-			if err := request.SendDiscordMessage("repair_complete", "success", job.discordContext()); err != nil {
-				r.logger.Error().Msgf("Error sending discord message: %v", err)
-			}
-		}()
+		r.sendDiscordNotification("repair_complete", "success", job.discordContext())
 
 		return nil
 	}
@@ -430,18 +431,10 @@ func (r *Repair) repair(job *Job) error {
 		// Job is already processed
 		job.CompletedAt = time.Now() // Mark as completed
 		job.Status = JobCompleted
-		go func() {
-			if err := request.SendDiscordMessage("repair_complete", "success", job.discordContext()); err != nil {
-				r.logger.Error().Msgf("Error sending discord message: %v", err)
-			}
-		}()
+		r.sendDiscordNotification("repair_complete", "success", job.discordContext())
 	} else {
 		job.Status = JobPending
-		go func() {
-			if err := request.SendDiscordMessage("repair_pending", "pending", job.discordContext()); err != nil {
-				r.logger.Error().Msgf("Error sending discord message: %v", err)
-			}
-		}()
+		r.sendDiscordNotification("repair_pending", "pending", job.discordContext())
 	}
 	return nil
 }
@@ -790,7 +783,7 @@ func (r *Repair) ProcessJob(id string) error {
 
 	// Update job status to in-progress
 	job.Status = JobProcessing
-	r.saveToFile()
+	r.scheduleAsyncSave()
 
 	// Launch a goroutine to wait for completion and update the job
 	go func() {
@@ -806,7 +799,7 @@ func (r *Repair) ProcessJob(id string) error {
 			r.logger.Info().Msgf("Job %s completed successfully", id)
 		}
 
-		r.saveToFile()
+		r.scheduleAsyncSave()
 	}()
 
 	return nil
@@ -867,7 +860,41 @@ func (r *Repair) DeleteJobs(ids []string) {
 			}
 		}
 	}
-	go r.saveToFile()
+	r.scheduleAsyncSave()
+}
+
+// sendDiscordNotification sends Discord notifications with bounded concurrency
+func (r *Repair) sendDiscordNotification(eventType, level, contextMsg string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+		defer cancel()
+
+		if err := r.notificationSem.Acquire(ctx, 1); err != nil {
+			r.logger.Warn().Err(err).Msg("Failed to acquire semaphore for Discord notification")
+			return
+		}
+		defer r.notificationSem.Release(1)
+
+		if err := request.SendDiscordMessage(eventType, level, contextMsg); err != nil {
+			r.logger.Error().Err(err).Msgf("Error sending discord message")
+		}
+	}()
+}
+
+// scheduleAsyncSave schedules file save operations with bounded concurrency
+func (r *Repair) scheduleAsyncSave() {
+	go func() {
+		ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+		defer cancel()
+
+		if err := r.fileSaveSem.Acquire(ctx, 1); err != nil {
+			r.logger.Warn().Err(err).Msg("Failed to acquire semaphore for file save")
+			return
+		}
+		defer r.fileSaveSem.Release(1)
+
+		r.saveToFile()
+	}()
 }
 
 // Cleanup Cleans up the repair instance
