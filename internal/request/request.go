@@ -418,6 +418,9 @@ type Client struct {
 	retryableStatusMu    sync.RWMutex // Protects retryableStatus map from concurrent access
 	logger               zerolog.Logger
 	proxy                string
+	// Resource tracking for debugging (optional)
+	openConnections      int64  // Atomic counter for tracking open connections
+	responseLeakTracker  bool   // Enable response body leak tracking
 }
 
 // WithMaxRetries sets the maximum number of retry attempts
@@ -518,7 +521,15 @@ func WithProxy(proxyURL string) ClientOption {
 	}
 }
 
+// WithResponseLeakTracker enables response body leak tracking for debugging
+func WithResponseLeakTracker(enabled bool) ClientOption {
+	return func(c *Client) {
+		c.responseLeakTracker = enabled
+	}
+}
+
 // doRequest performs a single HTTP request with rate limiting and circuit breaker
+// Note: Caller is responsible for closing the response body
 func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	// Check circuit breaker first
 	if c.circuitBreaker != nil {
@@ -542,7 +553,18 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	return c.client.Do(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Track open connections if debugging is enabled
+	if c.responseLeakTracker {
+		atomic.AddInt64(&c.openConnections, 1)
+		c.logger.Debug().Int64("open_connections", atomic.LoadInt64(&c.openConnections)).Str("url", req.URL.String()).Msg("HTTP response created")
+	}
+
+	return resp, nil
 }
 
 // applyEndpointRateLimit applies rate limiting based on the request URL
@@ -578,6 +600,7 @@ func (c *Client) applyEndpointRateLimit(req *http.Request) {
 }
 
 // Do performs an HTTP request with retries for certain status codes
+// Note: Caller is responsible for closing the response body of successful responses
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	// Save the request body for reuse in retries
 	var bodyBytes []byte
@@ -646,11 +669,19 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		_, isRetryable := c.retryableStatus[resp.StatusCode]
 		c.retryableStatusMu.RUnlock()
 		if !isRetryable || attempt == c.maxRetries {
+			// Success path - caller is responsible for closing response body
 			return resp, nil
 		}
 
-		// Close the response body before retrying
-		resp.Body.Close()
+		// Close the response body before retrying to prevent file handle leaks
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Debug().Err(closeErr).Msg("Failed to close response body before retry")
+		}
+		// Track connection closure if debugging is enabled
+		if c.responseLeakTracker {
+			atomic.AddInt64(&c.openConnections, -1)
+			c.logger.Debug().Int64("open_connections", atomic.LoadInt64(&c.openConnections)).Msg("HTTP response closed before retry")
+		}
 
 		// Apply backoff with jitter
 		jitter := time.Duration(rand.Int63n(int64(backoff / 4)))
@@ -681,6 +712,11 @@ func (c *Client) MakeRequest(req *http.Request) ([]byte, error) {
 		if err := res.Body.Close(); err != nil {
 			c.logger.Printf("Failed to close response body: %v", err)
 		}
+		// Track connection closure if debugging is enabled
+		if c.responseLeakTracker {
+			atomic.AddInt64(&c.openConnections, -1)
+			c.logger.Debug().Int64("open_connections", atomic.LoadInt64(&c.openConnections)).Str("url", req.URL.String()).Msg("HTTP response closed in MakeRequest")
+		}
 	}()
 
 	bodyBytes, err := io.ReadAll(res.Body)
@@ -695,6 +731,8 @@ func (c *Client) MakeRequest(req *http.Request) ([]byte, error) {
 	return bodyBytes, nil
 }
 
+// Get performs a GET request and returns the response
+// Note: Caller is responsible for closing the response body
 func (c *Client) Get(url string) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -702,6 +740,63 @@ func (c *Client) Get(url string) (*http.Response, error) {
 	}
 
 	return c.Do(req)
+}
+
+// GetWithAutoClose performs a GET request and automatically handles response body closure
+// Returns the response body bytes and any error encountered
+func (c *Client) GetWithAutoClose(url string) ([]byte, error) {
+	resp, err := c.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Debug().Err(closeErr).Str("url", url).Msg("Failed to close response body")
+		}
+		// Track connection closure if debugging is enabled
+		if c.responseLeakTracker {
+			atomic.AddInt64(&c.openConnections, -1)
+			c.logger.Debug().Int64("open_connections", atomic.LoadInt64(&c.openConnections)).Str("url", url).Msg("HTTP response auto-closed")
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
+
+	return body, nil
+}
+
+// DoWithAutoClose performs an HTTP request and automatically handles response body closure
+// Returns the response body bytes and status code
+func (c *Client) DoWithAutoClose(req *http.Request) ([]byte, int, error) {
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Debug().Err(closeErr).Str("url", req.URL.String()).Msg("Failed to close response body")
+		}
+		// Track connection closure if debugging is enabled
+		if c.responseLeakTracker {
+			atomic.AddInt64(&c.openConnections, -1)
+			c.logger.Debug().Int64("open_connections", atomic.LoadInt64(&c.openConnections)).Str("url", req.URL.String()).Msg("HTTP response auto-closed")
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("reading response body: %w", err)
+	}
+
+	return body, resp.StatusCode, nil
+}
+
+// GetOpenConnectionCount returns the current number of open HTTP connections for debugging
+func (c *Client) GetOpenConnectionCount() int64 {
+	return atomic.LoadInt64(&c.openConnections)
 }
 
 // Close gracefully shuts down the client and cleans up resources
@@ -712,6 +807,17 @@ func (c *Client) Close() error {
 			return err
 		}
 	}
+
+	// Log potential resource leaks if tracking is enabled
+	if c.responseLeakTracker {
+		openConns := atomic.LoadInt64(&c.openConnections)
+		if openConns > 0 {
+			c.logger.Warn().Int64("open_connections", openConns).Msg("Potential response body leaks detected on client close")
+		} else {
+			c.logger.Debug().Msg("All HTTP response bodies properly closed")
+		}
+	}
+
 	return nil
 }
 
