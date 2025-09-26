@@ -499,45 +499,49 @@ func (tb *Torbox) DeleteTorrent(torrentId string) error {
 }
 
 func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
-	filesCh := make(chan types.File, len(t.Files))
-	linkCh := make(chan types.DownloadLink)
-	errCh := make(chan error, len(t.Files))
-
 	var wg sync.WaitGroup
-	wg.Add(len(t.Files))
-	for _, file := range t.Files {
-		go func() {
+	var mu sync.Mutex
+	var firstErr error
+
+	files := make(map[string]types.File)
+	links := make(map[string]types.DownloadLink)
+
+	_files := t.GetFiles()
+	wg.Add(len(_files))
+
+	for _, f := range _files {
+		go func(file types.File) {
 			defer wg.Done()
+
 			link, err := tb.GetDownloadLink(t, &file)
 			if err != nil {
-				errCh <- err
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
 				return
 			}
+
 			if link.DownloadLink != "" {
-				linkCh <- link
 				file.DownloadLink = link
+				mu.Lock()
+				files[file.Name] = file
+				links[link.DownloadLink] = link
+				mu.Unlock()
+			} else {
+				// Still add file even without download link
+				mu.Lock()
+				files[file.Name] = file
+				mu.Unlock()
 			}
-			filesCh <- file
-		}()
-	}
-	go func() {
-		wg.Wait()
-		close(filesCh)
-		close(linkCh)
-		close(errCh)
-	}()
-
-	// Collect results
-	files := make(map[string]types.File, len(t.Files))
-	for file := range filesCh {
-		files[file.Name] = file
+		}(f)
 	}
 
-	// Check for errors
-	for err := range errCh {
-		if err != nil {
-			return err // Return the first error encountered
-		}
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
 	}
 
 	t.Files = files

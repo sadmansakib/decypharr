@@ -295,50 +295,49 @@ func (ad *AllDebrid) DeleteTorrent(torrentId string) error {
 }
 
 func (ad *AllDebrid) GetFileDownloadLinks(t *types.Torrent) error {
-	filesCh := make(chan types.File, len(t.Files))
-	linksCh := make(chan types.DownloadLink, len(t.Files))
-	errCh := make(chan error, len(t.Files))
-
 	var wg sync.WaitGroup
-	wg.Add(len(t.Files))
-	for _, file := range t.Files {
+	var mu sync.Mutex
+	var firstErr error
+
+	files := make(map[string]types.File)
+	links := make(map[string]types.DownloadLink)
+
+	_files := t.GetFiles()
+	wg.Add(len(_files))
+
+	for _, f := range _files {
 		go func(file types.File) {
 			defer wg.Done()
+
 			link, err := ad.GetDownloadLink(t, &file)
 			if err != nil {
-				errCh <- err
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
 				return
 			}
-			linksCh <- link
-			file.DownloadLink = link
-			filesCh <- file
-		}(file)
-	}
-	go func() {
-		wg.Wait()
-		close(filesCh)
-		close(linksCh)
-		close(errCh)
-	}()
-	files := make(map[string]types.File, len(t.Files))
-	for file := range filesCh {
-		files[file.Name] = file
+
+			if !link.Empty() {
+				file.DownloadLink = link
+				mu.Lock()
+				files[file.Name] = file
+				links[link.Link] = link
+				mu.Unlock()
+			} else {
+				// Still add file even without download link
+				mu.Lock()
+				files[file.Name] = file
+				mu.Unlock()
+			}
+		}(f)
 	}
 
-	// Collect download links
-	links := make(map[string]types.DownloadLink, len(t.Files))
+	wg.Wait()
 
-	for link := range linksCh {
-		if link.Empty() {
-			continue
-		}
-		links[link.Link] = link
-	}
-	// Check for errors
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
+	if firstErr != nil {
+		return firstErr
 	}
 
 	t.Files = files
