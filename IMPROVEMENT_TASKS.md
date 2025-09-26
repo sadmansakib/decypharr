@@ -11,10 +11,11 @@ Generated from codebase analysis on 2025-09-26
   - Implement dedicated writer goroutine with channel-based communication
   - Add proper synchronization for file operations
 
-- [ ] **Task 2: Fix unsafe map access in Torbox provider** (`pkg/debrid/providers/torbox/torbox.go:501-544`)
+- [x] **Task 2: Fix unsafe map access in Torbox provider** (`pkg/debrid/providers/torbox/torbox.go:501-544`)
   - Add mutex protection for concurrent map writes in `GetFileDownloadLinks`
   - Consider using sync.Map for high-concurrency scenarios
   - Review all debrid providers for similar issues
+  - **COMPLETED**: Fixed race conditions in Torbox and AllDebrid providers using mutex-protected map writes
 
 - [ ] **Task 3: Audit circuit breaker state management** (`internal/request/request.go:102-135`)
   - Review complex state transitions for race windows
