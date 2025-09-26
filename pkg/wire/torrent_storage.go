@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,9 +17,18 @@ func keyPair(hash, category string) string {
 type Torrents = map[string]*Torrent
 
 type TorrentStorage struct {
-	torrents Torrents
-	mu       sync.RWMutex
-	filename string // Added to store the filename for persistence
+	torrents     Torrents
+	mu           sync.RWMutex
+	filename     string // Added to store the filename for persistence
+	saveCh       chan saveRequest
+	writerCtx    context.Context
+	writerCancel context.CancelFunc
+	writerDone   chan struct{}
+}
+
+// saveRequest represents a request to save the current state to file
+type saveRequest struct {
+	response chan error
 }
 
 func loadTorrentsFromJSON(filename string) (Torrents, error) {
@@ -39,35 +49,123 @@ func newTorrentStorage(filename string) *TorrentStorage {
 	if err != nil {
 		torrents = make(Torrents)
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
 	// Create a new Storage
-	return &TorrentStorage{
-		torrents: torrents,
-		filename: filename,
+	ts := &TorrentStorage{
+		torrents:     torrents,
+		filename:     filename,
+		saveCh:       make(chan saveRequest, 100), // Buffered channel to prevent blocking
+		writerCtx:    ctx,
+		writerCancel: cancel,
+		writerDone:   make(chan struct{}),
 	}
+
+	// Start the dedicated writer goroutine
+	go ts.writerLoop()
+
+	return ts
+}
+
+// NewTorrentStorageForTesting creates a TorrentStorage instance for testing purposes
+// This is exported to allow testing of the race condition fix
+func NewTorrentStorageForTesting(filename string) *TorrentStorage {
+	return newTorrentStorage(filename)
+}
+
+// writerLoop is the dedicated goroutine that handles all file write operations
+func (ts *TorrentStorage) writerLoop() {
+	defer close(ts.writerDone)
+
+	for {
+		select {
+		case <-ts.writerCtx.Done():
+			// Process any remaining save requests before shutting down
+			for {
+				select {
+				case req := <-ts.saveCh:
+					err := ts.saveToFileSync()
+					req.response <- err
+					close(req.response)
+				default:
+					return
+				}
+			}
+		case req := <-ts.saveCh:
+			// Handle save request
+			err := ts.saveToFileSync()
+			req.response <- err
+			close(req.response)
+		}
+	}
+}
+
+// requestSave sends a save request to the writer goroutine
+func (ts *TorrentStorage) requestSave() error {
+	req := saveRequest{
+		response: make(chan error, 1),
+	}
+
+	select {
+	case ts.saveCh <- req:
+		// Wait for the save operation to complete
+		return <-req.response
+	case <-ts.writerCtx.Done():
+		return fmt.Errorf("torrent storage is shutting down")
+	}
+}
+
+// requestSaveAsync sends a save request to the writer goroutine without waiting for completion
+func (ts *TorrentStorage) requestSaveAsync() {
+	req := saveRequest{
+		response: make(chan error, 1),
+	}
+
+	select {
+	case ts.saveCh <- req:
+		// Don't wait for completion, but handle the response to prevent goroutine leak
+		go func() {
+			err := <-req.response
+			if err != nil {
+				fmt.Printf("Async save error: %v\n", err)
+			}
+		}()
+	case <-ts.writerCtx.Done():
+		// Storage is shutting down, ignore save request
+	default:
+		// Channel is full, drop the save request to prevent blocking
+		// This is acceptable since we only need the latest state persisted
+	}
+}
+
+// Close gracefully shuts down the TorrentStorage
+func (ts *TorrentStorage) Close() error {
+	// Cancel the writer context
+	ts.writerCancel()
+
+	// Wait for the writer goroutine to finish
+	<-ts.writerDone
+
+	return nil
 }
 
 func (ts *TorrentStorage) Add(torrent *Torrent) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.torrents[keyPair(torrent.Hash, torrent.Category)] = torrent
-	go func() {
-		err := ts.saveToFile()
-		if err != nil {
-			fmt.Println(err)
-		}
-	}()
+
+	// Request asynchronous save
+	ts.requestSaveAsync()
 }
 
 func (ts *TorrentStorage) AddOrUpdate(torrent *Torrent) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.torrents[keyPair(torrent.Hash, torrent.Category)] = torrent
-	go func() {
-		err := ts.saveToFile()
-		if err != nil {
-			fmt.Println(err)
-		}
-	}()
+
+	// Request asynchronous save
+	ts.requestSaveAsync()
 }
 
 func (ts *TorrentStorage) Get(hash, category string) *Torrent {
@@ -156,12 +254,9 @@ func (ts *TorrentStorage) Update(torrent *Torrent) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.torrents[keyPair(torrent.Hash, torrent.Category)] = torrent
-	go func() {
-		err := ts.saveToFile()
-		if err != nil {
-			fmt.Println(err)
-		}
-	}()
+
+	// Request asynchronous save
+	ts.requestSaveAsync()
 }
 
 func (ts *TorrentStorage) Delete(hash, category string, removeFromDebrid bool) {
@@ -196,12 +291,9 @@ func (ts *TorrentStorage) Delete(hash, category string, removeFromDebrid bool) {
 			break
 		}
 	}
-	go func() {
-		err := ts.saveToFile()
-		if err != nil {
-			fmt.Println(err)
-		}
-	}()
+
+	// Request asynchronous save
+	ts.requestSaveAsync()
 }
 
 func (ts *TorrentStorage) DeleteMultiple(hashes []string, removeFromDebrid bool) {
@@ -235,12 +327,9 @@ func (ts *TorrentStorage) DeleteMultiple(hashes []string, removeFromDebrid bool)
 			}
 		}
 	}
-	go func() {
-		err := ts.saveToFile()
-		if err != nil {
-			fmt.Println(err)
-		}
-	}()
+
+	// Request asynchronous save
+	ts.requestSaveAsync()
 
 	clients := st.debrid.Clients()
 
@@ -259,11 +348,12 @@ func (ts *TorrentStorage) DeleteMultiple(hashes []string, removeFromDebrid bool)
 }
 
 func (ts *TorrentStorage) Save() error {
-	return ts.saveToFile()
+	return ts.requestSave()
 }
 
-// saveToFile is a helper function to write the current state to the JSON file
-func (ts *TorrentStorage) saveToFile() error {
+// saveToFileSync is the synchronous version that performs the actual file write
+// This method should only be called from the writer goroutine
+func (ts *TorrentStorage) saveToFileSync() error {
 	ts.mu.RLock()
 	data, err := json.MarshalIndent(ts.torrents, "", "  ")
 	ts.mu.RUnlock()
@@ -271,6 +361,12 @@ func (ts *TorrentStorage) saveToFile() error {
 		return err
 	}
 	return os.WriteFile(ts.filename, data, 0644)
+}
+
+// saveToFile is deprecated but kept for backward compatibility
+// Use requestSave() or requestSaveAsync() instead
+func (ts *TorrentStorage) saveToFile() error {
+	return ts.requestSave()
 }
 
 func (ts *TorrentStorage) Reset() {

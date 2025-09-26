@@ -128,6 +128,11 @@ func Reset() {
 		if currentInstance.importsQueue != nil {
 			currentInstance.importsQueue.Close()
 		}
+		if currentInstance.torrents != nil {
+			if err := currentInstance.torrents.Close(); err != nil {
+				currentInstance.logger.Error().Err(err).Msg("Failed to close torrent storage")
+			}
+		}
 		if currentInstance.downloadSemaphore != nil {
 			// Close the semaphore channel
 			close(currentInstance.downloadSemaphore)
