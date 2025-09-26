@@ -57,6 +57,19 @@ const (
 	CircuitHalfOpen
 )
 
+// Helper functions for combined state management
+// encodeCombinedState combines circuit state and half-open requests into a single int64
+func encodeCombinedState(state CircuitBreakerState, halfOpenRequests int32) int64 {
+	return int64(state)<<16 | int64(halfOpenRequests&0xFFFF)
+}
+
+// decodeCombinedState extracts circuit state and half-open requests from combined state
+func decodeCombinedState(combined int64) (CircuitBreakerState, int32) {
+	state := CircuitBreakerState((combined >> 16) & 0xFFFF)
+	halfOpenRequests := int32(combined & 0xFFFF)
+	return state, halfOpenRequests
+}
+
 // CircuitBreakerConfig defines configuration for circuit breaker
 type CircuitBreakerConfig struct {
 	FailureThreshold    int           // Number of consecutive 429s to open circuit
@@ -67,12 +80,12 @@ type CircuitBreakerConfig struct {
 // CircuitBreaker manages the circuit breaker state for rate limiting
 type CircuitBreaker struct {
 	config           CircuitBreakerConfig
-	state            int32 // CircuitBreakerState (atomic)
+	// Combined state: lower 16 bits = half-open requests, upper 16 bits = circuit state
+	combinedState    int64 // Atomic combined state (state<<16 | halfOpenRequests)
 	failureCount     int32 // Consecutive failures (atomic)
-	halfOpenRequests int32 // Requests in half-open state (atomic)
 	lastFailureTime  int64 // Unix timestamp of last failure (atomic)
 	logger           zerolog.Logger
-	mu               sync.RWMutex
+	mu               sync.RWMutex // For critical state transitions
 	// Lifecycle management
 	ctx              context.Context
 	cancel           context.CancelFunc
@@ -84,12 +97,12 @@ type CircuitBreaker struct {
 func NewCircuitBreaker(config CircuitBreakerConfig, logger zerolog.Logger) *CircuitBreaker {
 	ctx, cancel := context.WithCancel(context.Background())
 	cb := &CircuitBreaker{
-		config: config,
-		state:  int32(CircuitClosed),
-		logger: logger,
-		ctx:    ctx,
-		cancel: cancel,
-		done:   make(chan struct{}),
+		config:        config,
+		combinedState: encodeCombinedState(CircuitClosed, 0),
+		logger:        logger,
+		ctx:           ctx,
+		cancel:        cancel,
+		done:          make(chan struct{}),
 	}
 
 	// Start background cleanup goroutine
@@ -105,33 +118,55 @@ func (cb *CircuitBreaker) Allow() error {
 		return fmt.Errorf("circuit breaker is closed")
 	}
 
-	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
+	// Limit iterations to prevent potential infinite loops
+	maxIterations := 100
+	for i := 0; i < maxIterations; i++ {
+		combined := atomic.LoadInt64(&cb.combinedState)
+		state, halfOpenRequests := decodeCombinedState(combined)
 
-	switch state {
-	case CircuitClosed:
-		return nil
-	case CircuitOpen:
-		// Check if recovery timeout has passed
-		lastFailure := time.Unix(atomic.LoadInt64(&cb.lastFailureTime), 0)
-		if time.Since(lastFailure) >= cb.config.RecoveryTimeout {
-			// Transition to half-open
-			if atomic.CompareAndSwapInt32(&cb.state, int32(CircuitOpen), int32(CircuitHalfOpen)) {
-				atomic.StoreInt32(&cb.halfOpenRequests, 0)
-				cb.logger.Info().Msg("Circuit breaker transitioning to half-open state")
+		switch state {
+		case CircuitClosed:
+			return nil
+		case CircuitOpen:
+			// Atomically read the last failure time to avoid races
+			lastFailureTime := atomic.LoadInt64(&cb.lastFailureTime)
+			if lastFailureTime == 0 {
+				// No failure recorded yet, shouldn't be in open state
+				continue
 			}
+
+			lastFailure := time.Unix(lastFailureTime, 0)
+			if time.Since(lastFailure) >= cb.config.RecoveryTimeout {
+				// Attempt atomic transition to half-open with first request slot reserved
+				newCombined := encodeCombinedState(CircuitHalfOpen, 1)
+				if atomic.CompareAndSwapInt64(&cb.combinedState, combined, newCombined) {
+					cb.logger.Info().Msg("Circuit breaker transitioning to half-open state")
+					return nil
+				}
+				// CAS failed, someone else changed state, retry
+				continue
+			}
+			return fmt.Errorf("circuit breaker is open - rate limit protection active")
+		case CircuitHalfOpen:
+			// Check if we can increment half-open requests
+			if halfOpenRequests >= int32(cb.config.MaxHalfOpenRequests) {
+				return fmt.Errorf("circuit breaker half-open request limit exceeded")
+			}
+
+			// Attempt atomic increment of half-open requests
+			newCombined := encodeCombinedState(CircuitHalfOpen, halfOpenRequests+1)
+			if atomic.CompareAndSwapInt64(&cb.combinedState, combined, newCombined) {
+				return nil
+			}
+			// CAS failed, retry with updated state
+			continue
+		default:
 			return nil
 		}
-		return fmt.Errorf("circuit breaker is open - rate limit protection active")
-	case CircuitHalfOpen:
-		// Allow limited requests in half-open state
-		if atomic.LoadInt32(&cb.halfOpenRequests) < int32(cb.config.MaxHalfOpenRequests) {
-			atomic.AddInt32(&cb.halfOpenRequests, 1)
-			return nil
-		}
-		return fmt.Errorf("circuit breaker half-open request limit exceeded")
-	default:
-		return nil
 	}
+
+	// If we reach here, we've hit the iteration limit
+	return fmt.Errorf("circuit breaker state transition limit exceeded")
 }
 
 // RecordSuccess records a successful response
@@ -141,19 +176,38 @@ func (cb *CircuitBreaker) RecordSuccess() {
 		return
 	}
 
-	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
+	// Limit iterations to prevent infinite loops
+	maxIterations := 50
+	for i := 0; i < maxIterations; i++ {
+		combined := atomic.LoadInt64(&cb.combinedState)
+		state, _ := decodeCombinedState(combined)
 
-	switch state {
-	case CircuitHalfOpen:
-		// Reset to closed state after successful request in half-open
-		if atomic.CompareAndSwapInt32(&cb.state, int32(CircuitHalfOpen), int32(CircuitClosed)) {
+		switch state {
+		case CircuitHalfOpen:
+			// Atomically transition from half-open to closed
+			newCombined := encodeCombinedState(CircuitClosed, 0)
+			if atomic.CompareAndSwapInt64(&cb.combinedState, combined, newCombined) {
+				// Reset failure count atomically after successful state transition
+				atomic.StoreInt32(&cb.failureCount, 0)
+				cb.logger.Info().Msg("Circuit breaker closed - service recovered")
+				return
+			}
+			// CAS failed, retry with updated state
+			continue
+		case CircuitClosed:
+			// Reset failure count on success in closed state
 			atomic.StoreInt32(&cb.failureCount, 0)
-			cb.logger.Info().Msg("Circuit breaker closed - service recovered")
+			return
+		case CircuitOpen:
+			// No action needed in open state
+			return
+		default:
+			return
 		}
-	case CircuitClosed:
-		// Reset failure count on success
-		atomic.StoreInt32(&cb.failureCount, 0)
 	}
+
+	// If we reach here, log a warning about iteration limit
+	cb.logger.Warn().Msg("RecordSuccess: state transition limit exceeded")
 }
 
 // RecordFailure records a 429 response failure
@@ -163,24 +217,98 @@ func (cb *CircuitBreaker) RecordFailure() {
 		return
 	}
 
+	// Record failure time and increment failure count atomically
 	atomic.StoreInt64(&cb.lastFailureTime, time.Now().Unix())
 	failures := atomic.AddInt32(&cb.failureCount, 1)
 
-	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
+	// Limit iterations to prevent infinite loops
+	maxIterations := 50
+	for i := 0; i < maxIterations; i++ {
+		combined := atomic.LoadInt64(&cb.combinedState)
+		state, _ := decodeCombinedState(combined)
 
-	switch state {
-	case CircuitClosed:
-		if failures >= int32(cb.config.FailureThreshold) {
-			if atomic.CompareAndSwapInt32(&cb.state, int32(CircuitClosed), int32(CircuitOpen)) {
-				cb.logger.Warn().Int32("failures", failures).Msg("Circuit breaker opened due to rate limit violations")
+		switch state {
+		case CircuitClosed:
+			// Check if we should transition to open state
+			if failures >= int32(cb.config.FailureThreshold) {
+				newCombined := encodeCombinedState(CircuitOpen, 0)
+				if atomic.CompareAndSwapInt64(&cb.combinedState, combined, newCombined) {
+					cb.logger.Warn().Int32("failures", failures).Msg("Circuit breaker opened due to rate limit violations")
+					return
+				}
+				// CAS failed, retry with updated state
+				continue
 			}
-		}
-	case CircuitHalfOpen:
-		// Immediately return to open state on failure during half-open
-		if atomic.CompareAndSwapInt32(&cb.state, int32(CircuitHalfOpen), int32(CircuitOpen)) {
-			cb.logger.Warn().Msg("Circuit breaker reopened - service still rate limiting")
+			return
+		case CircuitHalfOpen:
+			// Immediately return to open state on failure during half-open
+			newCombined := encodeCombinedState(CircuitOpen, 0)
+			if atomic.CompareAndSwapInt64(&cb.combinedState, combined, newCombined) {
+				cb.logger.Warn().Msg("Circuit breaker reopened - service still rate limiting")
+				return
+			}
+			// CAS failed, retry with updated state
+			continue
+		case CircuitOpen:
+			// Already open, nothing to do
+			return
+		default:
+			return
 		}
 	}
+
+	// If we reach here, log a warning about iteration limit
+	cb.logger.Warn().Msg("RecordFailure: state transition limit exceeded")
+}
+
+// validateStateConsistency checks for state consistency issues (for debugging)
+func (cb *CircuitBreaker) validateStateConsistency() bool {
+	combined := atomic.LoadInt64(&cb.combinedState)
+	state, halfOpenRequests := decodeCombinedState(combined)
+	failureCount := atomic.LoadInt32(&cb.failureCount)
+	closed := atomic.LoadInt32(&cb.closed)
+
+	// Basic consistency checks
+	if closed == 1 {
+		return true // Don't validate when circuit breaker is shut down
+	}
+
+	// If state is closed, half-open requests should be zero
+	if state == CircuitClosed && halfOpenRequests != 0 {
+		cb.logger.Warn().Int32("state", int32(state)).Int32("halfOpenRequests", halfOpenRequests).
+			Msg("State consistency violation: closed state with non-zero half-open requests")
+		return false
+	}
+
+	// If state is open, half-open requests should be zero
+	if state == CircuitOpen && halfOpenRequests != 0 {
+		cb.logger.Warn().Int32("state", int32(state)).Int32("halfOpenRequests", halfOpenRequests).
+			Msg("State consistency violation: open state with non-zero half-open requests")
+		return false
+	}
+
+	// Handle negative half-open requests (rollback race condition)
+	if halfOpenRequests < 0 {
+		cb.logger.Warn().Int32("halfOpenRequests", halfOpenRequests).
+			Msg("State consistency violation: negative half-open requests (rollback race)")
+		return false
+	}
+
+	// Failure count should never be negative
+	if failureCount < 0 {
+		cb.logger.Warn().Int32("failureCount", failureCount).
+			Msg("State consistency violation: negative failure count")
+		return false
+	}
+
+	// Half-open requests should never be negative
+	if halfOpenRequests < 0 {
+		cb.logger.Warn().Int32("halfOpenRequests", halfOpenRequests).
+			Msg("State consistency violation: negative half-open requests")
+		return false
+	}
+
+	return true
 }
 
 // Close gracefully shuts down the circuit breaker and cleans up resources
@@ -236,8 +364,17 @@ func (cb *CircuitBreaker) periodicMaintenance() {
 		return
 	}
 
-	state := CircuitBreakerState(atomic.LoadInt32(&cb.state))
+	combined := atomic.LoadInt64(&cb.combinedState)
+	state, halfOpenRequests := decodeCombinedState(combined)
 	lastFailure := time.Unix(atomic.LoadInt64(&cb.lastFailureTime), 0)
+
+	// Clean up inconsistent state: reset half-open requests if not in half-open state
+	if state != CircuitHalfOpen && halfOpenRequests != 0 {
+		cb.logger.Debug().Int32("state", int32(state)).Int32("halfOpenRequests", halfOpenRequests).
+			Msg("Cleaning up inconsistent half-open requests")
+		newCombined := encodeCombinedState(state, 0)
+		atomic.CompareAndSwapInt64(&cb.combinedState, combined, newCombined)
+	}
 
 	// If circuit has been open for a very long time, log for monitoring
 	if state == CircuitOpen && time.Since(lastFailure) > cb.config.RecoveryTimeout*5 {
