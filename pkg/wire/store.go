@@ -34,11 +34,27 @@ type Store struct {
 var (
 	instance *Store
 	once     sync.Once
+	mu       sync.RWMutex // Protects instance access during reset operations
 )
 
 // Get returns the singleton instance
 func Get() *Store {
+	mu.RLock()
+	if instance != nil {
+		defer mu.RUnlock()
+		return instance
+	}
+	mu.RUnlock()
+
 	once.Do(func() {
+		mu.Lock()
+		defer mu.Unlock()
+
+		// Double-check after acquiring write lock
+		if instance != nil {
+			return
+		}
+
 		cfg := config.Get()
 		qbitCfg := cfg.QBitTorrent
 
@@ -57,7 +73,8 @@ func Get() *Store {
 			scheduler, _ = gocron.NewScheduler(gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-store")))
 		}
 
-		instance = &Store{
+		// Create the instance atomically
+		newInstance := &Store{
 			repair:            repair.New(arrs, deb),
 			arr:               arrs,
 			debrid:            deb,
@@ -70,50 +87,64 @@ func Get() *Store {
 			importsQueue:      NewImportQueue(context.Background(), 1000),
 			scheduler:         scheduler,
 		}
+
 		if cfg.RemoveStalledAfter != "" {
 			removeStalledAfter, err := time.ParseDuration(cfg.RemoveStalledAfter)
 			if err == nil {
-				instance.removeStalledAfter = removeStalledAfter
+				newInstance.removeStalledAfter = removeStalledAfter
 			}
 		}
+
+		// Assign the fully initialized instance atomically
+		instance = newInstance
 	})
+
+	mu.RLock()
+	defer mu.RUnlock()
 	return instance
 }
 
 func Reset() {
-	if instance != nil {
-		// Stop workers first
-		instance.StopWorkers()
+	mu.Lock()
+	defer mu.Unlock()
 
-		if instance.debrid != nil {
-			instance.debrid.Reset()
+	// Capture the current instance to avoid race conditions
+	currentInstance := instance
+	if currentInstance != nil {
+		// Stop workers first
+		currentInstance.StopWorkers()
+
+		if currentInstance.debrid != nil {
+			currentInstance.debrid.Reset()
 		}
 
-		if instance.rcloneManager != nil {
-			err := instance.rcloneManager.Stop()
+		if currentInstance.rcloneManager != nil {
+			err := currentInstance.rcloneManager.Stop()
 			if err != nil {
-				instance.logger.Error().Err(err).Msg("Failed to stop rclone manager")
+				currentInstance.logger.Error().Err(err).Msg("Failed to stop rclone manager")
 			}
 		}
 
-		if instance.importsQueue != nil {
-			instance.importsQueue.Close()
+		if currentInstance.importsQueue != nil {
+			currentInstance.importsQueue.Close()
 		}
-		if instance.downloadSemaphore != nil {
-			// Close the semaphore channel to
-			close(instance.downloadSemaphore)
+		if currentInstance.downloadSemaphore != nil {
+			// Close the semaphore channel
+			close(currentInstance.downloadSemaphore)
 		}
 
-		if instance.scheduler != nil {
-			_ = instance.scheduler.StopJobs()
-			_ = instance.scheduler.Shutdown()
+		if currentInstance.scheduler != nil {
+			_ = currentInstance.scheduler.StopJobs()
+			_ = currentInstance.scheduler.Shutdown()
 		}
 
 		// Cancel cache workers if still running
-		if instance.cacheWorkersCancel != nil {
-			instance.cacheWorkersCancel()
+		if currentInstance.cacheWorkersCancel != nil {
+			currentInstance.cacheWorkersCancel()
 		}
 	}
+
+	// Reset the singleton state atomically
 	once = sync.Once{}
 	instance = nil
 }
