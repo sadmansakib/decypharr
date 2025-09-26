@@ -18,3 +18,5 @@ node_modules/
 .venv/
 .stignore
 .stfolder/**
+CLAUDE.md
+.serena/
