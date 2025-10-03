@@ -115,6 +115,17 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (types
 				return emptyDownloadLink, fmt.Errorf("download link is empty after retry")
 			}
 			return emptyDownloadLink, fmt.Errorf("download link is empty after retry")
+		} else if errors.Is(err, utils.DatabaseError) {
+			// Database error from Torbox - remove the torrent from WebDAV
+			c.logger.Warn().
+				Str("filename", filename).
+				Str("torrent_id", ct.Id).
+				Str("torrent_name", ct.Name).
+				Msg("DATABASE_ERROR detected from Torbox, removing torrent from WebDAV")
+
+			// Trigger removal from WebDAV cache
+			c.OnRemove(ct.Id)
+			return emptyDownloadLink, fmt.Errorf("torbox database error, torrent removed: %w", err)
 		} else if errors.Is(err, utils.TrafficExceededError) {
 			// This is likely a fair usage limit error
 			return emptyDownloadLink, err

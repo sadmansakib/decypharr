@@ -250,6 +250,20 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 		return nil, err
 	}
 	if data.Data == nil {
+		// Check if the error is a DATABASE_ERROR
+		errorStr := ""
+		if data.Error != nil {
+			errorStr = fmt.Sprintf("%v", data.Error)
+		}
+		if (data.Detail != "" && strings.Contains(strings.ToUpper(data.Detail), "DATABASE_ERROR")) ||
+			(errorStr != "" && strings.Contains(strings.ToUpper(errorStr), "DATABASE_ERROR")) {
+			tb.logger.Warn().
+				Str("magnet", torrent.Magnet.Link).
+				Str("detail", data.Detail).
+				Str("error", errorStr).
+				Msg("Torbox returned DATABASE_ERROR when adding torrent")
+			return nil, utils.DatabaseError
+		}
 		return nil, fmt.Errorf("error adding torrent")
 	}
 	dt := *data.Data
@@ -296,6 +310,20 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	}
 	data := res.Data
 	if data == nil {
+		// Check if the error is a DATABASE_ERROR
+		errorStr := ""
+		if res.Error != nil {
+			errorStr = fmt.Sprintf("%v", res.Error)
+		}
+		if (res.Detail != "" && strings.Contains(strings.ToUpper(res.Detail), "DATABASE_ERROR")) ||
+			(errorStr != "" && strings.Contains(strings.ToUpper(errorStr), "DATABASE_ERROR")) {
+			tb.logger.Warn().
+				Str("torrent_id", torrentId).
+				Str("detail", res.Detail).
+				Str("error", errorStr).
+				Msg("Torbox returned DATABASE_ERROR when getting torrent")
+			return nil, utils.DatabaseError
+		}
 		return nil, fmt.Errorf("error getting torrent")
 	}
 	t := &types.Torrent{
@@ -585,6 +613,23 @@ func (tb *Torbox) GetDownloadLink(t *types.Torrent, file *types.File) (types.Dow
 			Interface("error", data.Error).
 			Str("detail", data.Detail).
 			Msg("Torbox API returned no data")
+
+		// Check if the error is a DATABASE_ERROR
+		errorStr := ""
+		if data.Error != nil {
+			errorStr = fmt.Sprintf("%v", data.Error)
+		}
+		if (data.Detail != "" && strings.Contains(strings.ToUpper(data.Detail), "DATABASE_ERROR")) ||
+			(errorStr != "" && strings.Contains(strings.ToUpper(errorStr), "DATABASE_ERROR")) {
+			tb.logger.Warn().
+				Str("torrent_id", t.Id).
+				Str("file_id", file.Id).
+				Str("detail", data.Detail).
+				Str("error", errorStr).
+				Msg("Torbox returned DATABASE_ERROR")
+			return types.DownloadLink{}, utils.DatabaseError
+		}
+
 		return types.DownloadLink{}, fmt.Errorf("error getting download links")
 	}
 

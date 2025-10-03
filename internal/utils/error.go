@@ -42,6 +42,16 @@ var TooManyActiveDownloadsError = &HTTPError{
 	Code:       "too_many_active_downloads",
 }
 
+var DatabaseError = &HTTPError{
+	StatusCode: 500,
+	Message:    "Database error occurred",
+	Code:       "database_error",
+}
+
 func IsTooManyActiveDownloadsError(err error) bool {
 	return errors.As(err, &TooManyActiveDownloadsError)
+}
+
+func IsDatabaseError(err error) bool {
+	return errors.Is(err, DatabaseError)
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
@@ -212,6 +214,14 @@ func (c *Cache) refreshTorrent(torrentId string) *CachedTorrent {
 
 	torrent, err := c.client.GetTorrent(torrentId)
 	if err != nil {
+		// Check if it's a DATABASE_ERROR
+		if errors.Is(err, utils.DatabaseError) {
+			c.logger.Warn().
+				Str("torrent_id", torrentId).
+				Msg("DATABASE_ERROR detected when refreshing torrent, removing from WebDAV")
+			c.OnRemove(torrentId)
+			return nil
+		}
 		c.logger.Error().Err(err).Msgf("Failed to get torrent %s", torrentId)
 		return nil
 	}
