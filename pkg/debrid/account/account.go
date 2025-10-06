@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/request"
@@ -52,6 +53,13 @@ func (a *Account) GetDownloadLink(fileLink string) (types.DownloadLink, error) {
 	if !ok {
 		return types.DownloadLink{}, types.ErrDownloadLinkNotFound
 	}
+
+	// Check if the download link has expired
+	if !dl.ExpiresAt.IsZero() && time.Now().After(dl.ExpiresAt) {
+		a.links.Delete(slicedLink)
+		return types.DownloadLink{}, types.ErrDownloadLinkNotFound
+	}
+
 	return dl, nil
 }
 
