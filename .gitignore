@@ -18,3 +18,7 @@ node_modules/
 .venv/
 .stignore
 .stfolder/**
+.claude/
+.serena/
+CLAUDE.md
+.kiro/
