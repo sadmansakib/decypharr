@@ -2,6 +2,7 @@ package torbox
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"mime/multipart"
@@ -26,6 +27,11 @@ import (
 	"go.uber.org/ratelimit"
 )
 
+const (
+	// userMeCacheDuration is the duration for which user data is cached (7 days)
+	userMeCacheDuration = 7 * 24 * time.Hour
+)
+
 type Torbox struct {
 	name                  string
 	Host                  string `json:"host"`
@@ -40,6 +46,9 @@ type Torbox struct {
 	logger      zerolog.Logger
 	checkCached bool
 	addSamples  bool
+
+	// User data cache with 7-day expiry
+	userMeCache *userMeCache
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
@@ -72,6 +81,7 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 	// - GET /torrents/mylist: 300/hour AND 60/min (status checks)
 	// - GET /torrents/checkcached: 600/hour AND 120/min (availability checks)
 	// - DELETE /torrents/controltorrent: 60/hour AND 10/min (torrent management)
+	// - GET /user/me: 60/hour AND 10/min (user information - rarely called due to caching)
 	clientOpts = append(clientOpts,
 		// createtorrent endpoint with dual limits
 		request.WithEndpointLimiter(
@@ -115,6 +125,12 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 			`^/v1/api/torrents/controltorrent`,
 			request.ParseMultipleRateLimits("60/hour", "10/min"),
 		),
+		// user/me endpoint - user information (rarely called due to 7-day caching)
+		request.WithEndpointLimiter(
+			"GET",
+			`^/v1/api/user/me`,
+			request.ParseMultipleRateLimits("60/hour", "10/min"),
+		),
 	)
 
 	client := request.New(clientOpts...)
@@ -127,10 +143,10 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 	_log.Info().
 		Str("provider", "torbox").
 		Str("general_rate_limit", dc.RateLimit).
-		Int("endpoint_limiters", 7).
+		Int("endpoint_limiters", 8).
 		Msg("Torbox client initialized with enhanced endpoint-specific rate limiters")
 
-	return &Torbox{
+	tb := &Torbox{
 		name:                  "torbox",
 		Host:                  "https://api.torbox.app/v1",
 		APIKey:                dc.APIKey,
@@ -142,7 +158,107 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		logger:                _log,
 		checkCached:           dc.CheckCached,
 		addSamples:            dc.AddSamples,
-	}, nil
+		userMeCache: &userMeCache{
+			data:      nil,
+			expiresAt: time.Time{},
+			mu:        sync.RWMutex{},
+		},
+	}
+
+	// Fetch user data on startup
+	go func() {
+		if _, err := tb.GetUserMe(context.Background()); err != nil {
+			_log.Warn().Err(err).Msg("Failed to fetch user data on startup")
+		} else {
+			_log.Info().Msg("User data fetched and cached successfully")
+		}
+	}()
+
+	// Start background refresh worker
+	go tb.startUserMeRefreshWorker(context.Background())
+
+	return tb, nil
+}
+
+// GetUserMe fetches user information from Torbox API with 7-day caching
+// The cache is automatically refreshed when expired
+func (tb *Torbox) GetUserMe(ctx context.Context) (*UserMeData, error) {
+	// Check if cached data is still valid
+	tb.userMeCache.mu.RLock()
+	if tb.userMeCache.data != nil && time.Now().Before(tb.userMeCache.expiresAt) {
+		data := tb.userMeCache.data
+		tb.userMeCache.mu.RUnlock()
+		tb.logger.Debug().
+			Time("expires_at", tb.userMeCache.expiresAt).
+			Msg("Returning cached user data")
+		return data, nil
+	}
+	tb.userMeCache.mu.RUnlock()
+
+	// Fetch fresh data
+	tb.logger.Debug().Msg("Fetching fresh user data from Torbox API")
+	url := fmt.Sprintf("%s/api/user/me?settings=false", tb.Host)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := tb.client.MakeRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch user data: %w", err)
+	}
+
+	var userResp UserMeResponse
+	if err := json.Unmarshal(resp, &userResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user data: %w", err)
+	}
+
+	if !userResp.Success || userResp.Data == nil {
+		return nil, fmt.Errorf("torbox API error: %v (detail: %s)", userResp.Error, userResp.Detail)
+	}
+
+	// Update cache with new data
+	tb.userMeCache.mu.Lock()
+	tb.userMeCache.data = userResp.Data
+	tb.userMeCache.expiresAt = time.Now().Add(userMeCacheDuration)
+	tb.userMeCache.mu.Unlock()
+
+	tb.logger.Info().
+		Int("user_id", userResp.Data.Id).
+		Str("email", userResp.Data.Email).
+		Bool("is_subscribed", userResp.Data.IsSubscribed).
+		Int("plan", userResp.Data.Plan).
+		Time("premium_expires_at", userResp.Data.PremiumExpiresAt).
+		Time("cache_expires_at", tb.userMeCache.expiresAt).
+		Msg("User data fetched and cached")
+
+	return userResp.Data, nil
+}
+
+// startUserMeRefreshWorker runs a background worker that refreshes user data every 7 days
+func (tb *Torbox) startUserMeRefreshWorker(ctx context.Context) {
+	ticker := time.NewTicker(24 * time.Hour) // Check daily if refresh is needed
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			tb.logger.Debug().Msg("User data refresh worker stopped")
+			return
+		case <-ticker.C:
+			// Check if cache needs refresh
+			tb.userMeCache.mu.RLock()
+			needsRefresh := tb.userMeCache.data == nil || time.Now().After(tb.userMeCache.expiresAt)
+			tb.userMeCache.mu.RUnlock()
+
+			if needsRefresh {
+				tb.logger.Debug().Msg("Cache expired, refreshing user data")
+				if _, err := tb.GetUserMe(ctx); err != nil {
+					tb.logger.Error().Err(err).Msg("Failed to refresh user data")
+				}
+			}
+		}
+	}
 }
 
 func (tb *Torbox) Name() string {

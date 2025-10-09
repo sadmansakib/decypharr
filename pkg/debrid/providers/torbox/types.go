@@ -1,6 +1,9 @@
 package torbox
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 type APIResponse[T any] struct {
 	Success bool   `json:"success"`
@@ -75,3 +78,41 @@ type InfoResponse APIResponse[torboxInfo]
 type DownloadLinksResponse APIResponse[string]
 
 type TorrentsListResponse APIResponse[[]torboxInfo]
+
+// UserMeData represents the user information returned by /api/user/me
+// Updated to match actual Torbox API response structure
+type UserMeData struct {
+	Id                          int        `json:"id"`
+	AuthId                      string     `json:"auth_id"`
+	CreatedAt                   time.Time  `json:"created_at"`
+	UpdatedAt                   time.Time  `json:"updated_at"`
+	Plan                        int        `json:"plan"`
+	TotalDownloaded             int        `json:"total_downloaded"`
+	Customer                    string     `json:"customer"`
+	IsSubscribed                bool       `json:"is_subscribed"`
+	PremiumExpiresAt            time.Time  `json:"premium_expires_at"`
+	CooldownUntil               *time.Time `json:"cooldown_until"` // Nullable
+	Email                       string     `json:"email"`
+	UserReferral                string     `json:"user_referral"`
+	BaseEmail                   string     `json:"base_email"`
+	TotalBytesDownloaded        int64      `json:"total_bytes_downloaded"`
+	TotalBytesUploaded          int64      `json:"total_bytes_uploaded"`
+	TorrentsDownloaded          int        `json:"torrents_downloaded"`
+	WebDownloadsDownloaded      int        `json:"web_downloads_downloaded"`
+	UsenetDownloadsDownloaded   int        `json:"usenet_downloads_downloaded"`
+	AdditionalConcurrentSlots   int        `json:"additional_concurrent_slots"`
+	LongTermSeeding             bool       `json:"long_term_seeding"`
+	LongTermStorage             bool       `json:"long_term_storage"`
+	IsVendor                    bool       `json:"is_vendor"`
+	VendorId                    *string    `json:"vendor_id"` // Nullable
+	PurchasesReferred           int        `json:"purchases_referred"`
+}
+
+type UserMeResponse APIResponse[UserMeData]
+
+// userMeCache holds cached user data with expiration
+type userMeCache struct {
+	data      *UserMeData
+	expiresAt time.Time
+	mu        sync.RWMutex
+}
