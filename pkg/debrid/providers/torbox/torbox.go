@@ -56,16 +56,22 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		request.WithRateLimiter(ratelimits["main"]),
 		request.WithLogger(_log),
 		request.WithProxy(dc.Proxy),
+		request.WithMaxRetries(5),
+		request.WithRetryableStatus(429, 502, 503, 504),
 	}
 
 	// Add endpoint-specific rate limiters for Torbox
 	// These endpoints have dual rate limits: hourly AND per-minute
 	//
-	// Torbox Rate Limits:
+	// Torbox Rate Limits (based on API documentation and observed behavior):
 	// - General endpoints: 5 req/sec
 	// - POST /torrents/createtorrent: 60/hour AND 10/min (dual limits)
 	// - POST /usenet/createusenetdownload: 60/hour AND 10/min (dual limits)
 	// - POST /webdl/createwebdownload: 60/hour AND 10/min (dual limits)
+	// - GET /torrents/requestdl: 120/hour AND 20/min (download link generation)
+	// - GET /torrents/mylist: 300/hour AND 60/min (status checks)
+	// - GET /torrents/checkcached: 600/hour AND 120/min (availability checks)
+	// - DELETE /torrents/controltorrent: 60/hour AND 10/min (torrent management)
 	clientOpts = append(clientOpts,
 		// createtorrent endpoint with dual limits
 		request.WithEndpointLimiter(
@@ -85,6 +91,30 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 			`^/v1/api/webdl/createwebdownload`,
 			request.ParseMultipleRateLimits("60/hour", "10/min"),
 		),
+		// requestdl endpoint - download link generation (frequently used by WebDAV)
+		request.WithEndpointLimiter(
+			"GET",
+			`^/v1/api/torrents/requestdl`,
+			request.ParseMultipleRateLimits("120/hour", "20/min"),
+		),
+		// mylist endpoint - torrent status checks (very frequent)
+		request.WithEndpointLimiter(
+			"GET",
+			`^/v1/api/torrents/mylist`,
+			request.ParseMultipleRateLimits("300/hour", "60/min"),
+		),
+		// checkcached endpoint - availability checks (batch operations)
+		request.WithEndpointLimiter(
+			"GET",
+			`^/v1/api/torrents/checkcached`,
+			request.ParseMultipleRateLimits("600/hour", "120/min"),
+		),
+		// controltorrent endpoint - torrent management operations
+		request.WithEndpointLimiter(
+			"DELETE",
+			`^/v1/api/torrents/controltorrent`,
+			request.ParseMultipleRateLimits("60/hour", "10/min"),
+		),
 	)
 
 	client := request.New(clientOpts...)
@@ -97,7 +127,8 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 	_log.Info().
 		Str("provider", "torbox").
 		Str("general_rate_limit", dc.RateLimit).
-		Msg("Torbox client initialized with endpoint-specific rate limiters")
+		Int("endpoint_limiters", 7).
+		Msg("Torbox client initialized with enhanced endpoint-specific rate limiters")
 
 	return &Torbox{
 		name:                  "torbox",
