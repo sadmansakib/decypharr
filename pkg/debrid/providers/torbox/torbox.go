@@ -49,16 +49,55 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		"User-Agent":    fmt.Sprintf("Decypharr/%s (%s; %s)", version.GetInfo(), runtime.GOOS, runtime.GOARCH),
 	}
 	_log := logger.New(dc.Name)
-	client := request.New(
+
+	// Configure client options
+	clientOpts := []request.ClientOption{
 		request.WithHeaders(headers),
 		request.WithRateLimiter(ratelimits["main"]),
 		request.WithLogger(_log),
 		request.WithProxy(dc.Proxy),
+	}
+
+	// Add endpoint-specific rate limiters for Torbox
+	// These endpoints have dual rate limits: hourly AND per-minute
+	//
+	// Torbox Rate Limits:
+	// - General endpoints: 5 req/sec
+	// - POST /torrents/createtorrent: 60/hour AND 10/min (dual limits)
+	// - POST /usenet/createusenetdownload: 60/hour AND 10/min (dual limits)
+	// - POST /webdl/createwebdownload: 60/hour AND 10/min (dual limits)
+	clientOpts = append(clientOpts,
+		// createtorrent endpoint with dual limits
+		request.WithEndpointLimiter(
+			"POST",
+			`^/v1/api/torrents/createtorrent`,
+			request.ParseMultipleRateLimits("60/hour", "10/min"),
+		),
+		// createusenetdownload endpoint with dual limits
+		request.WithEndpointLimiter(
+			"POST",
+			`^/v1/api/usenet/createusenetdownload`,
+			request.ParseMultipleRateLimits("60/hour", "10/min"),
+		),
+		// createwebdownload endpoint with dual limits
+		request.WithEndpointLimiter(
+			"POST",
+			`^/v1/api/webdl/createwebdownload`,
+			request.ParseMultipleRateLimits("60/hour", "10/min"),
+		),
 	)
+
+	client := request.New(clientOpts...)
+
 	autoExpiresLinksAfter, err := time.ParseDuration(dc.AutoExpireLinksAfter)
 	if autoExpiresLinksAfter == 0 || err != nil {
 		autoExpiresLinksAfter = 48 * time.Hour
 	}
+
+	_log.Info().
+		Str("provider", "torbox").
+		Str("general_rate_limit", dc.RateLimit).
+		Msg("Torbox client initialized with endpoint-specific rate limiters")
 
 	return &Torbox{
 		name:                  "torbox",
