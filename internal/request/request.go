@@ -51,16 +51,17 @@ type ClientOption func(*Client)
 
 // Client represents an HTTP client with additional capabilities
 type Client struct {
-	client          *http.Client
-	rateLimiter     ratelimit.Limiter
-	headers         map[string]string
-	headersMu       sync.RWMutex
-	maxRetries      int
-	timeout         time.Duration
-	skipTLSVerify   bool
-	retryableStatus map[int]struct{}
-	logger          zerolog.Logger
-	proxy           string
+	client           *http.Client
+	rateLimiter      ratelimit.Limiter
+	endpointLimiters *EndpointLimiterRegistry
+	headers          map[string]string
+	headersMu        sync.RWMutex
+	maxRetries       int
+	timeout          time.Duration
+	skipTLSVerify    bool
+	retryableStatus  map[int]struct{}
+	logger           zerolog.Logger
+	proxy            string
 }
 
 // WithMaxRetries sets the maximum number of retry attempts
@@ -87,6 +88,28 @@ func WithRedirectPolicy(policy func(req *http.Request, via []*http.Request) erro
 func WithRateLimiter(rl ratelimit.Limiter) ClientOption {
 	return func(c *Client) {
 		c.rateLimiter = rl
+	}
+}
+
+// WithEndpointLimiter adds an endpoint-specific rate limiter.
+// This allows different rate limits for different API endpoints.
+//
+// Parameters:
+//   - method: HTTP method ("GET", "POST", etc.) or "*" for any method
+//   - pattern: Regex pattern to match against request URL path
+//   - limiter: Rate limiter to apply (can be a CompositeRateLimiter for dual limits)
+//
+// Example:
+//   client := New(
+//     WithEndpointLimiter("POST", `^/api/torrents/createtorrent`,
+//       ParseMultipleRateLimits("60/hour", "10/min")),
+//   )
+func WithEndpointLimiter(method, pattern string, limiter ratelimit.Limiter) ClientOption {
+	return func(c *Client) {
+		if c.endpointLimiters == nil {
+			c.endpointLimiters = NewEndpointLimiterRegistry()
+		}
+		_ = c.endpointLimiters.Register(method, pattern, limiter)
 	}
 }
 
@@ -133,14 +156,44 @@ func WithProxy(proxyURL string) ClientOption {
 	}
 }
 
+// getRateLimiter selects the appropriate rate limiter for a request.
+// It checks endpoint-specific limiters first, then falls back to the default limiter.
+func (c *Client) getRateLimiter(req *http.Request) ratelimit.Limiter {
+	// Try to find an endpoint-specific limiter
+	if c.endpointLimiters != nil {
+		if limiter := c.endpointLimiters.GetLimiter(req); limiter != nil {
+			return limiter
+		}
+	}
+
+	// Fall back to default rate limiter
+	return c.rateLimiter
+}
+
 // doRequest performs a single HTTP request with rate limiting
 func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
-	if c.rateLimiter != nil {
+	// Get the appropriate rate limiter for this request
+	limiter := c.getRateLimiter(req)
+
+	if limiter != nil {
 		select {
 		case <-req.Context().Done():
 			return nil, req.Context().Err()
 		default:
-			c.rateLimiter.Take()
+			// Take a token from the rate limiter
+			// For composite limiters, this enforces all limits
+			start := time.Now()
+			limiter.Take()
+			duration := time.Since(start)
+
+			// Log if we had to wait for rate limiting
+			if duration > time.Millisecond {
+				c.logger.Debug().
+					Str("method", req.Method).
+					Str("path", req.URL.Path).
+					Dur("wait_duration", duration).
+					Msg("Rate limit enforced")
+			}
 		}
 	}
 
