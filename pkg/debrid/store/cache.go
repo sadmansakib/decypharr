@@ -69,6 +69,19 @@ const (
 	RepairTypeDelete   RepairType = "delete"
 )
 
+// linkRetryInfo tracks retry attempts for invalid links with exponential backoff
+type linkRetryInfo struct {
+	retryCount   int32
+	lastAttempt  time.Time
+	downloadLink string
+}
+
+// validationRetry tracks validation attempts before marking a link as invalid
+type validationRetry struct {
+	attemptCount int32
+	firstAttempt time.Time
+}
+
 type RepairRequest struct {
 	Type      RepairType
 	TorrentID string
@@ -89,7 +102,9 @@ type Cache struct {
 	invalidDownloadLinks *xsync.Map[string, string]
 	repairRequest        *xsync.Map[string, *reInsertRequest]
 	failedToReinsert     *xsync.Map[string, struct{}]
-	failedLinksCounter   *xsync.Map[string, atomic.Int32] // link -> counter
+	failedLinksCounter   *xsync.Map[string, atomic.Int32]     // link -> counter
+	linkRetryTracker     *xsync.Map[string, *linkRetryInfo]   // downloadLink -> retry info
+	linkValidationRetry  *xsync.Map[string, *validationRetry] // downloadLink -> validation attempts
 
 	// repair
 	repairChan chan RepairRequest
@@ -199,6 +214,8 @@ func NewDebridCache(dc config.Debrid, client common.Client, mounter *rclone.Moun
 		repairRequest:        xsync.NewMap[string, *reInsertRequest](),
 		failedToReinsert:     xsync.NewMap[string, struct{}](),
 		failedLinksCounter:   xsync.NewMap[string, atomic.Int32](),
+		linkRetryTracker:     xsync.NewMap[string, *linkRetryInfo](),
+		linkValidationRetry:  xsync.NewMap[string, *validationRetry](),
 		streamClient:         httpClient,
 		repairChan:           make(chan RepairRequest, 100), // Initialize the repair channel, max 100 requests buffered
 	}
@@ -254,6 +271,8 @@ func (c *Cache) Reset() {
 	c.invalidDownloadLinks = xsync.NewMap[string, string]()
 	c.repairRequest = xsync.NewMap[string, *reInsertRequest]()
 	c.failedToReinsert = xsync.NewMap[string, struct{}]()
+	c.linkRetryTracker = xsync.NewMap[string, *linkRetryInfo]()
+	c.linkValidationRetry = xsync.NewMap[string, *validationRetry]()
 
 	// 5. Rebuild the listing debouncer
 	c.listingDebouncer = utils.NewDebouncer[bool](
