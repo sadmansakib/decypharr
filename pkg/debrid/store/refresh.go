@@ -80,6 +80,9 @@ func (c *Cache) refreshTorrents(ctx context.Context) {
 	}
 
 	if len(deletedTorrents) > 0 {
+		c.logger.Debug().
+			Int("count", len(deletedTorrents)).
+			Msg("Torrents detected as missing from API response - scheduling validation")
 		go c.validateAndDeleteTorrents(deletedTorrents)
 	}
 
