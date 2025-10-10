@@ -7,11 +7,39 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
+const (
+	// ErrorCodeDatabaseError indicates the torrent has been deleted from Torbox's database
+	ErrorCodeDatabaseError = "DATABASE_ERROR"
+)
+
 type APIResponse[T any] struct {
 	Success bool   `json:"success"`
 	Error   any    `json:"error"`
 	Detail  string `json:"detail"`
 	Data    *T     `json:"data"` // Use pointer to allow nil
+}
+
+// ParseErrorCode extracts the error code from the API response
+// Torbox API can return errors as strings or objects with a code field
+func (r *APIResponse[T]) ParseErrorCode() string {
+	if r.Error == nil {
+		return ""
+	}
+
+	// Error can be a string (error code directly) or an object
+	switch v := r.Error.(type) {
+	case string:
+		return v
+	case map[string]interface{}:
+		if code, ok := v["code"].(string); ok {
+			return code
+		}
+		if msg, ok := v["message"].(string); ok {
+			// Sometimes error code is in the message field
+			return msg
+		}
+	}
+	return ""
 }
 
 type AvailableResponse APIResponse[map[string]struct {

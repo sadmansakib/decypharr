@@ -777,13 +777,25 @@ func (tb *Torbox) GetDownloadLink(t *types.Torrent, file *types.File) (types.Dow
 	}
 
 	if data.Data == nil {
+		errorCode := (*APIResponse[string])(&data).ParseErrorCode()
 		tb.logger.Error().
 			Str("torrent_id", t.Id).
 			Str("file_id", file.Id).
 			Bool("success", data.Success).
 			Interface("error", data.Error).
+			Str("error_code", errorCode).
 			Str("detail", data.Detail).
 			Msg("Torbox API returned no data")
+
+		// DATABASE_ERROR means the torrent has been deleted from Torbox
+		if errorCode == ErrorCodeDatabaseError {
+			tb.logger.Warn().
+				Str("torrent_id", t.Id).
+				Str("torrent_hash", t.InfoHash).
+				Msg("Torrent deleted from Torbox (DATABASE_ERROR)")
+			return types.DownloadLink{}, utils.TorrentNotFoundError
+		}
+
 		return types.DownloadLink{}, fmt.Errorf("error getting download links")
 	}
 
@@ -984,6 +996,13 @@ func (tb *Torbox) getTorboxInfoBatch(ctx context.Context, offset int) ([]*torbox
 	}
 
 	if !res.Success || res.Data == nil {
+		errorCode := (*APIResponse[[]torboxInfo])(&res).ParseErrorCode()
+		if errorCode == ErrorCodeDatabaseError {
+			tb.logger.Warn().
+				Str("error_code", errorCode).
+				Msg("DATABASE_ERROR in getTorboxInfoBatch - torrent(s) deleted from Torbox")
+			return nil, utils.TorrentNotFoundError
+		}
 		return nil, fmt.Errorf("torbox API error: %v", res.Error)
 	}
 
