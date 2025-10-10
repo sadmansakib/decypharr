@@ -3,6 +3,8 @@ package torbox
 import (
 	"sync"
 	"time"
+
+	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 type APIResponse[T any] struct {
@@ -22,6 +24,21 @@ type AddMagnetResponse APIResponse[struct {
 	Id   int    `json:"torrent_id"`
 	Hash string `json:"hash"`
 }]
+
+// TorboxFile represents a file within a torrent
+type TorboxFile struct {
+	Id           int         `json:"id"`
+	Md5          interface{} `json:"md5"`
+	Hash         string      `json:"hash"`
+	Name         string      `json:"name"`
+	Size         int64       `json:"size"`
+	Zipped       bool        `json:"zipped"`
+	S3Path       string      `json:"s3_path"`
+	Infected     bool        `json:"infected"`
+	Mimetype     string      `json:"mimetype"`
+	ShortName    string      `json:"short_name"`
+	AbsolutePath string      `json:"absolute_path"`
+}
 
 type torboxInfo struct {
 	Id              int         `json:"id"`
@@ -44,21 +61,9 @@ type torboxInfo struct {
 	Eta             int         `json:"eta"`
 	TorrentFile     bool        `json:"torrent_file"`
 	ExpiresAt       interface{} `json:"expires_at"`
-	DownloadPresent bool        `json:"download_present"`
-	Files           []struct {
-		Id           int         `json:"id"`
-		Md5          interface{} `json:"md5"`
-		Hash         string      `json:"hash"`
-		Name         string      `json:"name"`
-		Size         int64       `json:"size"`
-		Zipped       bool        `json:"zipped"`
-		S3Path       string      `json:"s3_path"`
-		Infected     bool        `json:"infected"`
-		Mimetype     string      `json:"mimetype"`
-		ShortName    string      `json:"short_name"`
-		AbsolutePath string      `json:"absolute_path"`
-	} `json:"files"`
-	DownloadPath     string      `json:"download_path"`
+	DownloadPresent bool         `json:"download_present"`
+	Files           []TorboxFile `json:"files"`
+	DownloadPath    string       `json:"download_path"`
 	InactiveCheck    int         `json:"inactive_check"`
 	Availability     float64     `json:"availability"`
 	DownloadFinished bool        `json:"download_finished"`
@@ -115,4 +120,36 @@ type userMeCache struct {
 	data      *UserMeData
 	expiresAt time.Time
 	mu        sync.RWMutex
+}
+
+// torrentsListCache holds cached torrents list with expiration
+// Implements double-checked locking with separate fetch mutex to prevent thundering herd
+//
+// LOCK ORDERING (to prevent deadlocks):
+// 1. fetchMu - Used for coordinating fetch operations (held during API calls)
+// 2. mu - Single lock protecting all cache data (data, convertedData, dataMap, expiresAt)
+//
+// The simplified single-lock approach eliminates potential deadlock scenarios
+// that could occur with multiple locks. While this may increase lock contention,
+// it ensures correctness and is acceptable for this use case since:
+// - Cache hits are fast (read lock only)
+// - Cache misses are infrequent (45-second TTL)
+// - The fetchMu prevents multiple goroutines from fetching simultaneously
+type torrentsListCache struct {
+	// Single mutex protecting all cache data
+	mu sync.RWMutex
+
+	// Raw torboxInfo data from API
+	data      []*torboxInfo
+	expiresAt time.Time
+
+	// Converted torrents cache to avoid repeated allocations
+	convertedData []*types.Torrent
+
+	// Map for O(1) lookup of torboxInfo by ID
+	dataMap map[string]*torboxInfo
+
+	// Separate mutex for fetch operations to prevent thundering herd
+	// This ensures only one goroutine fetches when cache expires
+	fetchMu sync.Mutex
 }
