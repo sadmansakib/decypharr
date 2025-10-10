@@ -450,15 +450,15 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	if err != nil {
 		return nil, err
 	}
-	var res InfoResponse
+	var res TorrentsListResponse
 	err = json.Unmarshal(resp, &res)
 	if err != nil {
 		return nil, err
 	}
-	data := res.Data
-	if data == nil {
-		return nil, fmt.Errorf("error getting torrent")
+	if res.Data == nil || len(*res.Data) == 0 {
+		return nil, fmt.Errorf("error getting torrent: no data returned")
 	}
+	data := &(*res.Data)[0]
 
 	return tb.convertSingleTorboxInfoToTorrent(data), nil
 }
@@ -569,12 +569,15 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 		if err != nil {
 			return err
 		}
-		var res InfoResponse
+		var res TorrentsListResponse
 		err = json.Unmarshal(resp, &res)
 		if err != nil {
 			return err
 		}
-		data = res.Data
+		if res.Data == nil || len(*res.Data) == 0 {
+			return fmt.Errorf("error getting torrent: no data returned")
+		}
+		data = &(*res.Data)[0]
 	}
 
 	name := data.Name
