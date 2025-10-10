@@ -368,7 +368,7 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 		d.TorrentsRefreshInterval = cmp.Or(c.WebDav.TorrentsRefreshInterval, "45s") // 45 seconds
 	}
 	if d.WebDav.DownloadLinksRefreshInterval == "" {
-		d.DownloadLinksRefreshInterval = cmp.Or(c.WebDav.DownloadLinksRefreshInterval, "40m") // 40 minutes
+		d.DownloadLinksRefreshInterval = cmp.Or(c.WebDav.DownloadLinksRefreshInterval, "2h") // 2 hours
 	}
 	if d.Workers == 0 {
 		d.Workers = perDebrid
