@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-co-op/gocron/v2"
 	"github.com/sirrobot01/decypharr/internal/utils"
@@ -24,6 +25,13 @@ func (c *Cache) StartWorker(ctx context.Context) error {
 			c.logger.Error().Err(err).Msg("Failed to create download link refresh job")
 		} else {
 			c.logger.Debug().Msgf("Download link refresh job scheduled for every %s", c.downloadLinksRefreshInterval)
+
+			// Warn if interval is less than 30 minutes
+			if dur, err := time.ParseDuration(c.downloadLinksRefreshInterval); err == nil {
+				if dur < 30*time.Minute {
+					c.logger.Warn().Msgf("Download link refresh interval (%s) is less than 30 minutes, which may cause rate limit issues with the debrid provider", c.downloadLinksRefreshInterval)
+				}
+			}
 		}
 	}
 
