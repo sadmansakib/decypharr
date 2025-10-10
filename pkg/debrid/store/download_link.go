@@ -3,14 +3,19 @@ package store
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync/atomic"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 const (
-	MaxLinkFailures = 10
+	MaxLinkFailures       = 10
+	MaxValidationRetries  = 3 // Retry same link 3 times before marking invalid
+	MaxBackoffDuration    = 30 * time.Minute
+	ValidationRetryWindow = 5 * time.Minute // Reset validation counter after 5 minutes
 )
 
 func (c *Cache) GetDownloadLink(torrentName, filename, fileLink string) (types.DownloadLink, error) {
@@ -198,4 +203,105 @@ func (c *Cache) GetTotalActiveDownloadLinks() int {
 		total += acc.DownloadLinksCount()
 	}
 	return total
+}
+
+// shouldRetryInvalidLink checks if enough time has passed to retry fetching a new link
+// Uses exponential backoff: 1min, 2min, 4min, 8min, 16min, 30min (max)
+func (c *Cache) shouldRetryInvalidLink(downloadLink string) bool {
+	info, ok := c.linkRetryTracker.Load(downloadLink)
+	if !ok {
+		return true // First attempt, allow it
+	}
+
+	// Calculate exponential backoff duration
+	backoffDuration := time.Duration(math.Min(
+		float64(time.Minute)*math.Pow(2, float64(info.retryCount)),
+		float64(MaxBackoffDuration),
+	))
+
+	timeSinceLastAttempt := time.Since(info.lastAttempt)
+
+	if timeSinceLastAttempt < backoffDuration {
+		c.logger.Debug().
+			Str("downloadLink", downloadLink).
+			Int32("retryCount", info.retryCount).
+			Dur("backoffDuration", backoffDuration).
+			Dur("timeSinceLastAttempt", timeSinceLastAttempt).
+			Dur("timeRemaining", backoffDuration-timeSinceLastAttempt).
+			Msg("Invalid link retry backoff in effect")
+		return false
+	}
+
+	return true
+}
+
+// recordInvalidLinkRetry records a retry attempt for an invalid link
+func (c *Cache) recordInvalidLinkRetry(downloadLink string) {
+	info, _ := c.linkRetryTracker.LoadOrCompute(downloadLink, func() (*linkRetryInfo, bool) {
+		return &linkRetryInfo{
+			retryCount:   0,
+			lastAttempt:  time.Now(),
+			downloadLink: downloadLink,
+		}, true
+	})
+
+	info.retryCount++
+	info.lastAttempt = time.Now()
+	c.linkRetryTracker.Store(downloadLink, info)
+
+	c.logger.Debug().
+		Str("downloadLink", downloadLink).
+		Int32("retryCount", info.retryCount).
+		Msg("Recorded invalid link retry attempt")
+}
+
+// shouldValidateLink checks if we should retry the same link before marking it invalid
+// Returns true if we should retry, false if we should mark as invalid
+func (c *Cache) shouldValidateLink(downloadLink string) bool {
+	retry, ok := c.linkValidationRetry.Load(downloadLink)
+	if !ok {
+		// First validation attempt
+		c.linkValidationRetry.Store(downloadLink, &validationRetry{
+			attemptCount: 1,
+			firstAttempt: time.Now(),
+		})
+		return true // Allow first attempt
+	}
+
+	// Check if validation window has expired (reset counter)
+	if time.Since(retry.firstAttempt) > ValidationRetryWindow {
+		c.logger.Debug().
+			Str("downloadLink", downloadLink).
+			Msg("Validation retry window expired, resetting counter")
+		c.linkValidationRetry.Store(downloadLink, &validationRetry{
+			attemptCount: 1,
+			firstAttempt: time.Now(),
+		})
+		return true
+	}
+
+	// Check if we've exceeded max validation retries
+	if retry.attemptCount >= MaxValidationRetries {
+		c.logger.Debug().
+			Str("downloadLink", downloadLink).
+			Int32("attemptCount", retry.attemptCount).
+			Msg("Max validation retries reached, marking link as invalid")
+		return false
+	}
+
+	// Increment attempt counter
+	retry.attemptCount++
+	c.linkValidationRetry.Store(downloadLink, retry)
+
+	c.logger.Debug().
+		Str("downloadLink", downloadLink).
+		Int32("attemptCount", retry.attemptCount).
+		Msg("Retrying link validation")
+
+	return true
+}
+
+// clearValidationRetry clears the validation retry counter for a link (called on success)
+func (c *Cache) clearValidationRetry(downloadLink string) {
+	c.linkValidationRetry.Delete(downloadLink)
 }
