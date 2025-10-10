@@ -1,6 +1,8 @@
 package common
 
 import (
+	"context"
+
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/pkg/debrid/account"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
@@ -16,7 +18,7 @@ type Client interface {
 	GetDownloadUncached() bool
 	UpdateTorrent(torrent *types.Torrent) error
 	GetTorrent(torrentId string) (*types.Torrent, error)
-	GetTorrents() ([]*types.Torrent, error)
+	GetTorrents(ctx context.Context) ([]*types.Torrent, error)
 	Name() string
 	Logger() zerolog.Logger
 	GetDownloadingStatus() []string
@@ -25,6 +27,6 @@ type Client interface {
 	GetMountPath() string
 	AccountManager() *account.Manager // Returns the active download account/token
 	GetProfile() (*types.Profile, error)
-	GetAvailableSlots() (int, error)
+	GetAvailableSlots(ctx context.Context) (int, error)
 	SyncAccounts() error // Updates each accounts details(like traffic, username, etc.)
 }
