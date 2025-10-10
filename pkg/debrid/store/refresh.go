@@ -54,7 +54,7 @@ func (c *Cache) refreshTorrents(ctx context.Context) {
 	defer c.torrentsRefreshMu.Unlock()
 
 	// Get all torrents from the debrid service
-	debTorrents, err := c.client.GetTorrents()
+	debTorrents, err := c.client.GetTorrents(ctx)
 	if err != nil {
 		c.logger.Error().Err(err).Msg("Failed to get torrents")
 		return

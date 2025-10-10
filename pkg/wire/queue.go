@@ -3,9 +3,10 @@ package wire
 import (
 	"context"
 	"fmt"
+	"time"
+
 	"github.com/go-co-op/gocron/v2"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	"time"
 )
 
 func (s *Store) addToQueue(importReq *ImportRequest) error {
@@ -78,7 +79,7 @@ func (s *Store) trackAvailableSlots(ctx context.Context) {
 	availableSlots := make(map[string]int)
 
 	for name, deb := range s.debrid.Debrids() {
-		slots, err := deb.Client().GetAvailableSlots()
+		slots, err := deb.Client().GetAvailableSlots(ctx)
 		if err != nil {
 			continue
 		}

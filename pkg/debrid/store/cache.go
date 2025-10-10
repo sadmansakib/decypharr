@@ -416,7 +416,7 @@ func (c *Cache) Sync(ctx context.Context) error {
 		c.logger.Error().Err(err).Msg("Failed to load cache")
 	}
 
-	torrents, err := c.client.GetTorrents()
+	torrents, err := c.client.GetTorrents(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to sync torrents: %v", err)
 	}
