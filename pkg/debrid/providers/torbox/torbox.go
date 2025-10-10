@@ -30,7 +30,47 @@ import (
 const (
 	// userMeCacheDuration is the duration for which user data is cached (7 days)
 	userMeCacheDuration = 7 * 24 * time.Hour
+
+	// torrentsListCacheDuration is the duration for which torrents list is cached (45 seconds)
+	// This value must be ≤ worker refresh interval to prevent stale data
+	// The worker refresh interval is configured in pkg/wire/worker.go and defaults to 45 seconds
+	// Aligns with the default torrent refresh interval to minimize duplicate API calls
+	torrentsListCacheDuration = 45 * time.Second
+
+	// maxPaginationIterations prevents infinite loops when fetching torrents
+	// At 100 items per page, this allows up to 10,000 torrents
+	maxPaginationIterations = 100
 )
+
+// Torbox slot configuration based on plan type
+// These values determine the maximum number of concurrent active torrents
+var torboxSlotConfig = map[int]int{
+	1: 3,  // Plan 1 (Essential): 3 slots
+	2: 10, // Plan 2 (Pro): 10 slots
+	3: 5,  // Plan 3 (Standard): 5 slots
+}
+
+// getTotalSlots calculates the total number of slots available for a user
+// based on their plan and additional concurrent slots
+func getTotalSlots(plan int, additionalSlots int) int {
+	baseSlots, exists := torboxSlotConfig[plan]
+	if !exists {
+		// Default to plan 1 if unknown plan type
+		baseSlots = torboxSlotConfig[1]
+	}
+
+	// Bounds checking for additionalSlots
+	if additionalSlots < 0 {
+		// Negative slots don't make sense, treat as 0
+		additionalSlots = 0
+	}
+	if additionalSlots > 1000 {
+		// Reasonable upper bound to prevent overflow or unrealistic values
+		additionalSlots = 1000
+	}
+
+	return baseSlots + additionalSlots
+}
 
 type Torbox struct {
 	name                  string
@@ -49,6 +89,9 @@ type Torbox struct {
 
 	// User data cache with 7-day expiry
 	userMeCache *userMeCache
+
+	// Torrents list cache with 45-second expiry
+	torrentsCache *torrentsListCache
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
@@ -162,6 +205,14 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 			data:      nil,
 			expiresAt: time.Time{},
 			mu:        sync.RWMutex{},
+		},
+		torrentsCache: &torrentsListCache{
+			mu:            sync.RWMutex{},
+			data:          nil,
+			expiresAt:     time.Time{},
+			convertedData: nil,
+			dataMap:       make(map[string]*torboxInfo),
+			fetchMu:       sync.Mutex{},
 		},
 	}
 
@@ -353,6 +404,9 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	torrent.Debrid = tb.name
 	torrent.Added = time.Now().Format(time.RFC3339)
 
+	// P0 Fix: Invalidate cache when a new torrent is added
+	tb.invalidateCache()
+
 	return torrent, nil
 }
 
@@ -377,6 +431,19 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) string {
 }
 
 func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
+	// P1 Fix: Use O(1) map lookup instead of linear search
+	if cachedInfo := tb.getTorboxInfoFromCache(torrentId); cachedInfo != nil {
+		tb.logger.Debug().
+			Str("torrent_id", torrentId).
+			Msg("Returning torrent from cache")
+		return tb.convertSingleTorboxInfoToTorrent(cachedInfo), nil
+	}
+
+	// Cache miss or expired, fetch from API
+	tb.logger.Debug().
+		Str("torrent_id", torrentId).
+		Msg("Fetching torrent from API (cache miss)")
+
 	url := fmt.Sprintf("%s/api/torrents/mylist/?id=%s", tb.Host, torrentId)
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	resp, err := tb.client.MakeRequest(req)
@@ -392,6 +459,12 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	if data == nil {
 		return nil, fmt.Errorf("error getting torrent")
 	}
+
+	return tb.convertSingleTorboxInfoToTorrent(data), nil
+}
+
+// convertSingleTorboxInfoToTorrent converts a single torboxInfo to types.Torrent
+func (tb *Torbox) convertSingleTorboxInfoToTorrent(data *torboxInfo) *types.Torrent {
 	t := &types.Torrent{
 		Id:               strconv.Itoa(data.Id),
 		Name:             data.Name,
@@ -473,22 +546,37 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	t.OriginalFilename = strings.Split(cleanPath, "/")[0]
 	t.Debrid = tb.name
 
-	return t, nil
+	return t
 }
 
 func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
-	url := fmt.Sprintf("%s/api/torrents/mylist/?id=%s", tb.Host, t.Id)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
-	resp, err := tb.client.MakeRequest(req)
-	if err != nil {
-		return err
+	// Try to get from cache first (P1: uses O(1) map lookup)
+	var data *torboxInfo
+	if cachedInfo := tb.getTorboxInfoFromCache(t.Id); cachedInfo != nil {
+		tb.logger.Debug().
+			Str("torrent_id", t.Id).
+			Msg("Updating torrent from cache")
+		data = cachedInfo
+	} else {
+		// Cache miss or expired, fetch from API
+		tb.logger.Debug().
+			Str("torrent_id", t.Id).
+			Msg("Updating torrent from API (cache miss)")
+
+		url := fmt.Sprintf("%s/api/torrents/mylist/?id=%s", tb.Host, t.Id)
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		resp, err := tb.client.MakeRequest(req)
+		if err != nil {
+			return err
+		}
+		var res InfoResponse
+		err = json.Unmarshal(resp, &res)
+		if err != nil {
+			return err
+		}
+		data = res.Data
 	}
-	var res InfoResponse
-	err = json.Unmarshal(resp, &res)
-	if err != nil {
-		return err
-	}
-	data := res.Data
+
 	name := data.Name
 
 	t.Name = name
@@ -589,7 +677,28 @@ func (tb *Torbox) DeleteTorrent(torrentId string) error {
 		return err
 	}
 	tb.logger.Info().Msgf("Torrent %s deleted from Torbox", torrentId)
+
+	// P0 Fix: Invalidate cache when a torrent is deleted
+	tb.invalidateCache()
+
 	return nil
+}
+
+// invalidateCache clears all cached torrent data
+// Should be called when torrents are added or deleted to ensure fresh data on next fetch
+func (tb *Torbox) invalidateCache() {
+	tb.torrentsCache.mu.Lock()
+	defer tb.torrentsCache.mu.Unlock()
+
+	tb.torrentsCache.data = nil
+	tb.torrentsCache.expiresAt = time.Time{}
+	tb.torrentsCache.convertedData = nil
+	// Explicitly clear map to help GC
+	for k := range tb.torrentsCache.dataMap {
+		delete(tb.torrentsCache.dataMap, k)
+	}
+
+	tb.logger.Debug().Msg("Torrents cache invalidated")
 }
 
 func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
@@ -706,35 +815,171 @@ func (tb *Torbox) GetDownloadingStatus() []string {
 	return []string{"downloading"}
 }
 
-func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
+// GetTorrents fetches the list of torrents with sophisticated caching
+// P0 Fix: Implements double-checked locking to prevent thundering herd
+// P1 Fix: Returns stale cache on API error instead of failing completely
+// P2 Fix: Caches converted torrents to avoid repeated allocations
+func (tb *Torbox) GetTorrents(ctx context.Context) ([]*types.Torrent, error) {
+	// First check: Quick read lock to check if cache is valid
+	tb.torrentsCache.mu.RLock()
+	cacheValid := tb.torrentsCache.data != nil && time.Now().Before(tb.torrentsCache.expiresAt)
+	if cacheValid && tb.torrentsCache.convertedData != nil {
+		// Fast path: return cached converted data
+		convertedData := tb.torrentsCache.convertedData
+		tb.torrentsCache.mu.RUnlock()
+		tb.logger.Debug().
+			Int("cached_count", len(convertedData)).
+			Msg("Returning cached converted torrents list")
+		return convertedData, nil
+	}
+	cachedData := tb.torrentsCache.data
+	tb.torrentsCache.mu.RUnlock()
+
+	// If cache is valid but converted data is nil, convert and cache
+	if cacheValid {
+		tb.logger.Debug().
+			Int("cached_count", len(cachedData)).
+			Msg("Converting cached raw data to torrents")
+		converted := tb.convertTorboxInfoToTorrents(cachedData)
+
+		// Store converted data
+		tb.torrentsCache.mu.Lock()
+		tb.torrentsCache.convertedData = converted
+		tb.torrentsCache.mu.Unlock()
+
+		return converted, nil
+	}
+
+	// P0 Fix: Double-checked locking pattern to prevent thundering herd
+	// Use fetch mutex to ensure only one goroutine fetches when cache expires
+	tb.torrentsCache.fetchMu.Lock()
+
+	// Second check: After acquiring fetch lock, check again if another goroutine already fetched
+	tb.torrentsCache.mu.RLock()
+	cacheValid = tb.torrentsCache.data != nil && time.Now().Before(tb.torrentsCache.expiresAt)
+	if cacheValid && tb.torrentsCache.convertedData != nil {
+		convertedData := tb.torrentsCache.convertedData
+		tb.torrentsCache.mu.RUnlock()
+		tb.torrentsCache.fetchMu.Unlock()
+		tb.logger.Debug().
+			Int("cached_count", len(convertedData)).
+			Msg("Another goroutine already fetched, returning cached data")
+		return convertedData, nil
+	}
+	cachedData = tb.torrentsCache.data
+	tb.torrentsCache.mu.RUnlock()
+
+	// If cache is valid but converted data is nil, convert and cache
+	if cacheValid {
+		tb.torrentsCache.fetchMu.Unlock()
+		converted := tb.convertTorboxInfoToTorrents(cachedData)
+		tb.torrentsCache.mu.Lock()
+		tb.torrentsCache.convertedData = converted
+		tb.torrentsCache.mu.Unlock()
+		return converted, nil
+	}
+
+	// Now we're the only goroutine that will fetch
+	tb.logger.Debug().Msg("Fetching fresh torrents list from Torbox API")
+
+	// Store old data in case API call fails (already have RLock released)
+	tb.torrentsCache.mu.RLock()
+	staleData := tb.torrentsCache.data
+	tb.torrentsCache.mu.RUnlock()
+
+	// Fetch fresh data from API
 	offset := 0
-	allTorrents := make([]*types.Torrent, 0)
+	allTorboxInfo := make([]*torboxInfo, 0)
+	iterations := 0
 
 	for {
-		torrents, err := tb.getTorrents(offset)
+		// P0 Fix: Check context cancellation before each iteration
+		select {
+		case <-ctx.Done():
+			tb.torrentsCache.fetchMu.Unlock()
+			if staleData != nil {
+				tb.logger.Warn().
+					Err(ctx.Err()).
+					Int("stale_count", len(staleData)).
+					Msg("Context cancelled during fetch, returning stale cache")
+				return tb.convertTorboxInfoToTorrents(staleData), nil
+			}
+			return nil, fmt.Errorf("context cancelled: %w", ctx.Err())
+		default:
+		}
+
+		// P0 Fix: Prevent infinite loops with max iteration limit
+		if iterations >= maxPaginationIterations {
+			tb.logger.Warn().
+				Int("iterations", iterations).
+				Int("fetched_count", len(allTorboxInfo)).
+				Msg("Reached max pagination iterations, stopping fetch")
+			break
+		}
+
+		torboxInfoBatch, err := tb.getTorboxInfoBatch(ctx, offset)
 		if err != nil {
+			// P1 Fix: Don't fail completely on error, return stale cache if available
+			tb.torrentsCache.fetchMu.Unlock()
+			if staleData != nil {
+				tb.logger.Warn().
+					Err(err).
+					Int("stale_count", len(staleData)).
+					Msg("API fetch failed, returning stale cache")
+				return tb.convertTorboxInfoToTorrents(staleData), nil
+			}
+			return nil, fmt.Errorf("failed to fetch torrents and no stale cache available: %w", err)
+		}
+		if len(torboxInfoBatch) == 0 {
 			break
 		}
-		if len(torrents) == 0 {
-			break
-		}
-		allTorrents = append(allTorrents, torrents...)
-		offset += len(torrents)
+		allTorboxInfo = append(allTorboxInfo, torboxInfoBatch...)
+		offset += len(torboxInfoBatch)
+		iterations++
 	}
-	return allTorrents, nil
+
+	// P1 Fix: Build dataMap for O(1) lookup
+	dataMap := make(map[string]*torboxInfo, len(allTorboxInfo))
+	for _, info := range allTorboxInfo {
+		dataMap[strconv.Itoa(info.Id)] = info
+	}
+
+	// P2 Fix: Convert data before caching
+	converted := tb.convertTorboxInfoToTorrents(allTorboxInfo)
+
+	// Update all caches with new data (single lock)
+	tb.torrentsCache.mu.Lock()
+	tb.torrentsCache.data = allTorboxInfo
+	tb.torrentsCache.expiresAt = time.Now().Add(torrentsListCacheDuration)
+	tb.torrentsCache.dataMap = dataMap
+	tb.torrentsCache.convertedData = converted
+	cacheExpiresAt := tb.torrentsCache.expiresAt
+	tb.torrentsCache.mu.Unlock()
+
+	tb.torrentsCache.fetchMu.Unlock()
+
+	tb.logger.Debug().
+		Int("total_torrents", len(allTorboxInfo)).
+		Time("cache_expires_at", cacheExpiresAt).
+		Msg("Torrents list fetched and cached")
+
+	return converted, nil
 }
 
-func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
+// getTorboxInfoBatch fetches a batch of torrents from Torbox API
+func (tb *Torbox) getTorboxInfoBatch(ctx context.Context, offset int) ([]*torboxInfo, error) {
 	url := fmt.Sprintf("%s/api/torrents/mylist?offset=%d", tb.Host, offset)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := tb.client.MakeRequest(req)
 	if err != nil {
 		return nil, err
 	}
 
 	var res TorrentsListResponse
-	err = json.Unmarshal(resp, &res)
-	if err != nil {
+	if err := json.Unmarshal(resp, &res); err != nil {
 		return nil, err
 	}
 
@@ -742,10 +987,61 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 		return nil, fmt.Errorf("torbox API error: %v", res.Error)
 	}
 
-	torrents := make([]*types.Torrent, 0, len(*res.Data))
+	result := make([]*torboxInfo, len(*res.Data))
+	for i := range *res.Data {
+		result[i] = &(*res.Data)[i]
+	}
+
+	return result, nil
+}
+
+// getTorboxInfoFromCache retrieves a single torrent from the cache by ID
+// P1 Fix: Uses O(1) map lookup instead of O(n) linear search
+// P2 Fix: Returns a deep copy to prevent external mutations and ensure thread safety
+// Returns nil if not found or cache is expired
+func (tb *Torbox) getTorboxInfoFromCache(torrentId string) *torboxInfo {
+	// Single read lock for both cache validity check and map lookup
+	tb.torrentsCache.mu.RLock()
+	defer tb.torrentsCache.mu.RUnlock()
+
+	// Check if cache is valid
+	cacheValid := tb.torrentsCache.data != nil && time.Now().Before(tb.torrentsCache.expiresAt)
+	if !cacheValid {
+		return nil
+	}
+
+	// P1 Fix: Use O(1) map lookup
+	info, found := tb.torrentsCache.dataMap[torrentId]
+	if !found {
+		return nil
+	}
+
+	// P2 Fix: Return a deep copy to prevent external mutations affecting cached data
+	// Deep copy is necessary because:
+	// 1. The Files slice is shared between the original and shallow copies
+	// 2. External code modifying the Files slice could cause race conditions
+	// 3. Ensures thread safety when multiple goroutines access the same cached data
+	//
+	// THREAD SAFETY NOTE: The Md5 field is interface{} which typically contains
+	// immutable data (nil, string, or number). If Md5 ever contains mutable data,
+	// this deep copy would need to handle that case explicitly.
+	infoCopy := *info
+
+	// Deep copy the Files slice to prevent shared references
+	if len(info.Files) > 0 {
+		infoCopy.Files = make([]TorboxFile, len(info.Files))
+		copy(infoCopy.Files, info.Files)
+	}
+
+	return &infoCopy
+}
+
+// convertTorboxInfoToTorrents converts torboxInfo structs to types.Torrent
+func (tb *Torbox) convertTorboxInfoToTorrents(torboxInfoList []*torboxInfo) []*types.Torrent {
+	torrents := make([]*types.Torrent, 0, len(torboxInfoList))
 	cfg := config.Get()
 
-	for _, data := range *res.Data {
+	for _, data := range torboxInfoList {
 		t := &types.Torrent{
 			Id:               strconv.Itoa(data.Id),
 			Name:             data.Name,
@@ -805,7 +1101,7 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 		torrents = append(torrents, t)
 	}
 
-	return torrents, nil
+	return torrents
 }
 
 func (tb *Torbox) GetDownloadUncached() bool {
@@ -824,9 +1120,47 @@ func (tb *Torbox) GetMountPath() string {
 	return tb.MountPath
 }
 
-func (tb *Torbox) GetAvailableSlots() (int, error) {
-	//TODO: Implement the logic to check available slots for Torbox
-	return 0, fmt.Errorf("not implemented")
+func (tb *Torbox) GetAvailableSlots(ctx context.Context) (int, error) {
+	// Get user data from cache (will fetch if not cached or expired)
+	userData, err := tb.GetUserMe(ctx)
+	if err != nil {
+		tb.logger.Error().Err(err).Msg("Failed to get user data for slot calculation")
+		return 0, fmt.Errorf("failed to get user data: %w", err)
+	}
+
+	// Calculate total slots based on plan and additional slots
+	totalSlots := getTotalSlots(userData.Plan, userData.AdditionalConcurrentSlots)
+
+	// Get current active torrents count
+	torrents, err := tb.GetTorrents(ctx)
+	if err != nil {
+		tb.logger.Error().Err(err).Msg("Failed to get torrents list for slot calculation")
+		return 0, fmt.Errorf("failed to get torrents: %w", err)
+	}
+
+	// Count active torrents (downloading or downloaded status)
+	activeTorrents := 0
+	for _, torrent := range torrents {
+		if torrent.Status == "downloading" || torrent.Status == "downloaded" {
+			activeTorrents++
+		}
+	}
+
+	// Calculate available slots
+	availableSlots := totalSlots - activeTorrents
+	if availableSlots < 0 {
+		availableSlots = 0
+	}
+
+	tb.logger.Debug().
+		Int("total_slots", totalSlots).
+		Int("active_torrents", activeTorrents).
+		Int("available_slots", availableSlots).
+		Int("plan", userData.Plan).
+		Int("additional_slots", userData.AdditionalConcurrentSlots).
+		Msg("Calculated available slots")
+
+	return availableSlots, nil
 }
 
 func (tb *Torbox) GetProfile() (*types.Profile, error) {
