@@ -308,6 +308,8 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 func (c *Cache) resetInvalidLinks(ctx context.Context) {
 	c.logger.Debug().Msgf("Resetting accounts")
 	c.invalidDownloadLinks = xsync.NewMap[string, string]()
+	c.linkRetryTracker = xsync.NewMap[string, *linkRetryInfo]()
+	c.linkValidationRetry = xsync.NewMap[string, *validationRetry]()
 	c.client.AccountManager().Reset() // Reset the active download keys
 	// Refresh the download links
 	c.refreshDownloadLinks(ctx)
