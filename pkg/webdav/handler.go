@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"golang.org/x/net/webdav"
 
@@ -24,23 +25,65 @@ import (
 
 const DeleteAllBadTorrentKey = "DELETE_ALL_BAD_TORRENTS"
 
+type downloadLinkCacheEntry struct {
+	link      types.DownloadLink
+	expiresAt time.Time
+}
+
 type Handler struct {
-	Name     string
-	logger   zerolog.Logger
-	cache    *store.Cache
-	URLBase  string
-	RootPath string
+	Name              string
+	logger            zerolog.Logger
+	cache             *store.Cache
+	URLBase           string
+	RootPath          string
+	downloadLinkCache *xsync.MapOf[string, downloadLinkCacheEntry]
 }
 
 func NewHandler(name, urlBase string, cache *store.Cache, logger zerolog.Logger) *Handler {
 	h := &Handler{
-		Name:     name,
-		cache:    cache,
-		logger:   logger,
-		URLBase:  urlBase,
-		RootPath: path.Join(urlBase, "webdav", name),
+		Name:              name,
+		cache:             cache,
+		logger:            logger,
+		URLBase:           urlBase,
+		RootPath:          path.Join(urlBase, "webdav", name),
+		downloadLinkCache: xsync.NewMapOf[string, downloadLinkCacheEntry](),
 	}
 	return h
+}
+
+// getCachedDownloadLink checks the WebDAV-level cache for a download link.
+// Returns the cached link and true if found and not expired, otherwise returns empty link and false.
+func (h *Handler) getCachedDownloadLink(torrentName, filename string) (types.DownloadLink, bool) {
+	key := torrentName + "/" + filename
+	entry, ok := h.downloadLinkCache.Load(key)
+	if !ok {
+		return types.DownloadLink{}, false
+	}
+
+	// Check if expired
+	if time.Now().After(entry.expiresAt) {
+		h.downloadLinkCache.Delete(key)
+		return types.DownloadLink{}, false
+	}
+
+	return entry.link, true
+}
+
+// cacheDownloadLink stores a download link in the WebDAV-level cache with a 2.5-hour TTL.
+func (h *Handler) cacheDownloadLink(torrentName, filename string, link types.DownloadLink) {
+	key := torrentName + "/" + filename
+	entry := downloadLinkCacheEntry{
+		link:      link,
+		expiresAt: time.Now().Add(2*time.Hour + 30*time.Minute), // 2.5 hours
+	}
+	h.downloadLinkCache.Store(key, entry)
+}
+
+// invalidateCachedDownloadLink removes a download link from the cache.
+// This is called when streaming errors occur to force a fresh link fetch on the next request.
+func (h *Handler) invalidateCachedDownloadLink(torrentName, filename string) {
+	key := torrentName + "/" + filename
+	h.downloadLinkCache.Delete(key)
 }
 
 // Mkdir implements webdav.FileSystem
@@ -197,6 +240,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 		versionInfo := version.GetInfo().String()
 		return &File{
 			cache:        h.cache,
+			handler:      h,
 			isDir:        false,
 			content:      []byte(versionInfo),
 			name:         "version.txt",
@@ -214,6 +258,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 		}
 		return &File{
 			cache:        h.cache,
+			handler:      h,
 			isDir:        true,
 			children:     children,
 			name:         displayName,
@@ -236,6 +281,7 @@ func (h *Handler) OpenFile(ctx context.Context, name string, flag int, perm os.F
 				if file, ok := cached.GetFile(filename); ok && !file.Deleted {
 					return &File{
 						cache:        h.cache,
+						handler:      h,
 						torrentName:  torrentName,
 						fileId:       file.Id,
 						isDir:        false,
