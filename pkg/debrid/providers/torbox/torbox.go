@@ -758,6 +758,15 @@ func (tb *Torbox) GetDownloadLink(t *types.Torrent, file *types.File) (types.Dow
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	resp, err := tb.client.MakeRequest(req)
 	if err != nil {
+		// Check if the error contains DATABASE_ERROR (HTTP 500 with DATABASE_ERROR in body)
+		if strings.Contains(err.Error(), "DATABASE_ERROR") {
+			tb.logger.Warn().
+				Str("torrent_id", t.Id).
+				Str("file_id", file.Id).
+				Str("torrent_hash", t.InfoHash).
+				Msg("Torrent deleted from Torbox (DATABASE_ERROR in HTTP 500 response)")
+			return types.DownloadLink{}, utils.TorrentNotFoundError
+		}
 		tb.logger.Error().
 			Err(err).
 			Str("torrent_id", t.Id).
@@ -987,6 +996,12 @@ func (tb *Torbox) getTorboxInfoBatch(ctx context.Context, offset int) ([]*torbox
 	}
 	resp, err := tb.client.MakeRequest(req)
 	if err != nil {
+		// Check if the error contains DATABASE_ERROR (HTTP 500 with DATABASE_ERROR in body)
+		if strings.Contains(err.Error(), "DATABASE_ERROR") {
+			tb.logger.Warn().
+				Msg("DATABASE_ERROR in getTorboxInfoBatch - torrent(s) deleted from Torbox")
+			return nil, utils.TorrentNotFoundError
+		}
 		return nil, err
 	}
 
