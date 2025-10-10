@@ -814,18 +814,56 @@ func (c *Cache) DeleteTorrent(id string) error {
 }
 
 func (c *Cache) validateAndDeleteTorrents(torrents []string) {
+	if len(torrents) == 0 {
+		return
+	}
+
+	c.logger.Info().
+		Int("count", len(torrents)).
+		Strs("torrent_ids", torrents).
+		Msg("Detected torrents missing from API response - validating deletion")
+
 	wg := sync.WaitGroup{}
+	var deletedCount atomic.Int32
+
 	for _, torrent := range torrents {
 		wg.Add(1)
 		go func(t string) {
 			defer wg.Done()
+
+			// Get torrent details before validation for better logging
+			cachedTorrent, exists := c.torrents.getByID(t)
+			torrentName := "unknown"
+			if exists {
+				torrentName = cachedTorrent.Name
+			}
+
 			// Check if torrent is truly deleted
-			if _, err := c.client.GetTorrent(t); err != nil {
+			_, err := c.client.GetTorrent(t)
+			if err != nil {
+				c.logger.Warn().
+					Str("torrent_id", t).
+					Str("torrent_name", torrentName).
+					Err(err).
+					Msg("Torrent confirmed deleted from debrid provider - removing from cache")
+
 				c.deleteTorrent(t, false) // Since it's removed from debrid already
+				deletedCount.Add(1)
+			} else {
+				c.logger.Debug().
+					Str("torrent_id", t).
+					Str("torrent_name", torrentName).
+					Msg("Torrent still exists on debrid provider - skipping deletion")
 			}
 		}(torrent)
 	}
 	wg.Wait()
+
+	c.logger.Info().
+		Int("validated", len(torrents)).
+		Int("deleted", int(deletedCount.Load())).
+		Msg("Completed torrent deletion validation")
+
 	c.listingDebouncer.Call(true)
 }
 
