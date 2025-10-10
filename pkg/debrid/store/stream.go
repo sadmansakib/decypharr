@@ -92,6 +92,8 @@ func (c *Cache) Stream(ctx context.Context, start, end int64, linkFunc func() (t
 
 		// Got response - check status
 		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+			// Success! Clear validation retry counter
+			c.clearValidationRetry(downloadLink.DownloadLink)
 			return resp, nil
 		}
 
@@ -104,10 +106,23 @@ func (c *Cache) Stream(ctx context.Context, start, end int64, linkFunc func() (t
 		}
 
 		if streamErr.LinkError {
+			// Check exponential backoff before fetching new link
+			if !c.shouldRetryInvalidLink(downloadLink.DownloadLink) {
+				c.logger.Debug().
+					Int("retries", retry).
+					Str("downloadLink", downloadLink.DownloadLink).
+					Msg("Exponential backoff in effect, skipping new link fetch")
+				return nil, fmt.Errorf("link retry backoff in effect: %w", streamErr)
+			}
+
 			c.logger.Trace().
 				Int("retries", retry).
 				Msg("Link error, getting fresh link")
 			lastErr = streamErr
+
+			// Record the retry attempt for exponential backoff
+			c.recordInvalidLinkRetry(downloadLink.DownloadLink)
+
 			// Try new link
 			downloadLink, err = linkFunc()
 			if err != nil {
@@ -203,15 +218,30 @@ func (c *Cache) handleHTTPError(resp *http.Response, downloadLink types.Download
 
 	switch resp.StatusCode {
 	case http.StatusNotFound:
+		// Try to validate the link before marking it invalid
+		if c.shouldValidateLink(downloadLink.DownloadLink) {
+			// Retry with the same link (validation attempt)
+			c.logger.Debug().
+				Str("downloadLink", downloadLink.DownloadLink).
+				Msg("Link returned 404, retrying for validation")
+			return StreamError{
+				Err:       errors.New("download link not found, retrying for validation"),
+				Retryable: true,
+				LinkError: false, // Don't fetch new link yet, retry same link
+			}
+		}
+
+		// Max validation retries reached, mark as invalid
 		c.MarkLinkAsInvalid(downloadLink, "link_not_found")
 		return StreamError{
 			Err:       errors.New("download link not found"),
 			Retryable: true,
-			LinkError: true,
+			LinkError: true, // Fetch new link
 		}
 
 	case http.StatusServiceUnavailable:
 		if strings.Contains(bodyStr, "bandwidth") || strings.Contains(bodyStr, "traffic") {
+			// Bandwidth errors should immediately mark as invalid (no validation retry)
 			c.MarkLinkAsInvalid(downloadLink, "bandwidth_exceeded")
 			return StreamError{
 				Err:       errors.New("bandwidth limit exceeded"),
