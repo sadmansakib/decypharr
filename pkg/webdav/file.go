@@ -42,6 +42,7 @@ type File struct {
 	content      []byte
 	children     []os.FileInfo // For directories
 	cache        *store.Cache
+	handler      *Handler // Reference to handler for cache access
 	modTime      time.Time
 
 	// Minimal state for interface compliance only
@@ -64,7 +65,19 @@ func (f *File) Close() error {
 }
 
 func (f *File) getDownloadLink() (types.DownloadLink, error) {
-	// Check if we already have a final URL cached
+	// Check WebDAV-level cache first
+	if f.handler != nil {
+		if cachedLink, ok := f.handler.getCachedDownloadLink(f.torrentName, f.name); ok {
+			_logger := f.cache.Logger()
+			_logger.Trace().
+				Str("file", f.name).
+				Str("torrent", f.torrentName).
+				Msg("Using cached download link from WebDAV handler")
+			return cachedLink, nil
+		}
+	}
+
+	// Cache miss - fetch from store layer
 	downloadLink, err := f.cache.GetDownloadLink(f.torrentName, f.name, f.link)
 	if err != nil {
 		return downloadLink, err
@@ -73,6 +86,12 @@ func (f *File) getDownloadLink() (types.DownloadLink, error) {
 	if err != nil {
 		return types.DownloadLink{}, err
 	}
+
+	// Cache the fetched link at WebDAV level
+	if f.handler != nil {
+		f.handler.cacheDownloadLink(f.torrentName, f.name, downloadLink)
+	}
+
 	return downloadLink, nil
 }
 
@@ -127,6 +146,10 @@ func (f *File) StreamResponse(w http.ResponseWriter, r *http.Request) error {
 	resp, err := f.cache.Stream(r.Context(), start, end, f.getDownloadLink)
 	if err != nil {
 		_logger.Error().Err(err).Str("file", f.name).Msg("Failed to stream with initial link")
+		// Invalidate cached link on error
+		if f.handler != nil {
+			f.handler.invalidateCachedDownloadLink(f.torrentName, f.name)
+		}
 		return &streamError{Err: err, StatusCode: http.StatusRequestedRangeNotSatisfiable}
 	}
 	defer func(Body io.ReadCloser) {
