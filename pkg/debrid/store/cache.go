@@ -105,6 +105,7 @@ type Cache struct {
 	failedLinksCounter   *xsync.Map[string, atomic.Int32]     // link -> counter
 	linkRetryTracker     *xsync.Map[string, *linkRetryInfo]   // downloadLink -> retry info
 	linkValidationRetry  *xsync.Map[string, *validationRetry] // downloadLink -> validation attempts
+	deletedTorrents      *xsync.Map[string, string]           // hash -> torrent name (tracks torrents deleted from debrid provider)
 
 	// repair
 	repairChan chan RepairRequest
@@ -216,6 +217,7 @@ func NewDebridCache(dc config.Debrid, client common.Client, mounter *rclone.Moun
 		failedLinksCounter:   xsync.NewMap[string, atomic.Int32](),
 		linkRetryTracker:     xsync.NewMap[string, *linkRetryInfo](),
 		linkValidationRetry:  xsync.NewMap[string, *validationRetry](),
+		deletedTorrents:      xsync.NewMap[string, string](),
 		streamClient:         httpClient,
 		repairChan:           make(chan RepairRequest, 100), // Initialize the repair channel, max 100 requests buffered
 	}

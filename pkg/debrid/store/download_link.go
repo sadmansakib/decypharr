@@ -95,7 +95,19 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (types
 	c.logger.Trace().Msgf("Getting download link for %s(%s)", filename, file.Link)
 	downloadLink, err := c.client.GetDownloadLink(ct.Torrent, &file)
 	if err != nil {
-		if errors.Is(err, utils.HosterUnavailableError) {
+		if errors.Is(err, utils.TorrentNotFoundError) {
+			// Torrent has been deleted from the debrid provider (e.g., Torbox DATABASE_ERROR)
+			c.logger.Warn().
+				Str("torrent_name", torrentName).
+				Str("torrent_id", ct.Id).
+				Str("torrent_hash", ct.InfoHash).
+				Msg("Torrent deleted from debrid provider - marking for deletion")
+
+			// Mark torrent for deletion - wire package will clean this up
+			c.markTorrentDeleted(ct.InfoHash, ct.Name)
+
+			return emptyDownloadLink, fmt.Errorf("torrent not found on debrid provider: %w", err)
+		} else if errors.Is(err, utils.HosterUnavailableError) {
 			c.logger.Trace().
 				Str("token", utils.Mask(downloadLink.Token)).
 				Str("filename", filename).
@@ -304,4 +316,27 @@ func (c *Cache) shouldValidateLink(downloadLink string) bool {
 // clearValidationRetry clears the validation retry counter for a link (called on success)
 func (c *Cache) clearValidationRetry(downloadLink string) {
 	c.linkValidationRetry.Delete(downloadLink)
+}
+
+// markTorrentDeleted marks a torrent as deleted from the debrid provider
+// This allows the wire package to clean up torrents that no longer exist on the debrid service
+func (c *Cache) markTorrentDeleted(hash, name string) {
+	c.deletedTorrents.Store(hash, name)
+	c.logger.Info().
+		Str("hash", hash).
+		Str("name", name).
+		Msg("Marked torrent as deleted from debrid provider")
+}
+
+// GetAndClearDeletedTorrents returns all torrents that have been marked as deleted
+// and clears the internal tracking map. This should be called by the wire package
+// to clean up torrents that no longer exist on the debrid provider.
+func (c *Cache) GetAndClearDeletedTorrents() map[string]string {
+	deleted := make(map[string]string)
+	c.deletedTorrents.Range(func(hash string, name string) bool {
+		deleted[hash] = name
+		c.deletedTorrents.Delete(hash)
+		return true
+	})
+	return deleted
 }

@@ -68,6 +68,20 @@ func (s *Store) StartQueueWorkers(ctx context.Context) error {
 		}
 	}
 
+	// Deleted torrents cleanup job - checks for torrents deleted from debrid providers
+	if jd, err := utils.ConvertToJobDef("1m"); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to convert deleted torrents cleanup interval to job definition")
+	} else {
+		// Schedule the job
+		if _, err := s.scheduler.NewJob(jd, gocron.NewTask(func() {
+			s.removeDeletedTorrents(ctx)
+		}), gocron.WithContext(ctx)); err != nil {
+			s.logger.Error().Err(err).Msg("Failed to create deleted torrents cleanup job")
+		} else {
+			s.logger.Trace().Msgf("Deleted torrents cleanup job scheduled for every %s", "1m")
+		}
+	}
+
 	// Start the scheduler
 	s.scheduler.Start()
 	s.logger.Debug().Msg("Store worker started")
@@ -139,4 +153,31 @@ func (s *Store) removeStalledTorrents(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (s *Store) removeDeletedTorrents(ctx context.Context) {
+	// This function checks for torrents that have been deleted from debrid providers
+	// and removes them from Decypharr's storage. This allows *Arr apps to re-request them if needed.
+	for _, cache := range s.debrid.Caches() {
+		if cache == nil {
+			continue
+		}
+
+		deletedTorrents := cache.GetAndClearDeletedTorrents()
+		if len(deletedTorrents) == 0 {
+			continue
+		}
+
+		for hash, name := range deletedTorrents {
+			s.logger.Warn().
+				Str("hash", hash).
+				Str("name", name).
+				Str("provider", cache.GetConfig().Name).
+				Msg("Removing torrent deleted from debrid provider - *Arr can re-add if needed")
+
+			// Delete from storage - don't try to delete from debrid (it's already gone)
+			// The third parameter (false) means don't delete from debrid
+			s.torrents.Delete(hash, "", false)
+		}
+	}
 }
