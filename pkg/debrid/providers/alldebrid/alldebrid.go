@@ -1,6 +1,7 @@
 package alldebrid
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -383,7 +384,7 @@ func (ad *AllDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (types.
 	return dl, nil
 }
 
-func (ad *AllDebrid) GetTorrents() ([]*types.Torrent, error) {
+func (ad *AllDebrid) GetTorrents(ctx context.Context) ([]*types.Torrent, error) {
 	url := fmt.Sprintf("%s/magnet/status?status=ready", ad.Host)
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	resp, err := ad.client.MakeRequest(req)
@@ -436,7 +437,7 @@ func (ad *AllDebrid) GetMountPath() string {
 	return ad.MountPath
 }
 
-func (ad *AllDebrid) GetAvailableSlots() (int, error) {
+func (ad *AllDebrid) GetAvailableSlots(ctx context.Context) (int, error) {
 	// This function is a placeholder for AllDebrid
 	//TODO: Implement the logic to check available slots for AllDebrid
 	return 0, fmt.Errorf("GetAvailableSlots not implemented for AllDebrid")

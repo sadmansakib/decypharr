@@ -2,6 +2,7 @@ package debridlink
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -366,7 +367,7 @@ func (dl *DebridLink) GetDownloadUncached() bool {
 	return dl.DownloadUncached
 }
 
-func (dl *DebridLink) GetTorrents() ([]*types.Torrent, error) {
+func (dl *DebridLink) GetTorrents(ctx context.Context) ([]*types.Torrent, error) {
 	page := 0
 	perPage := 100
 	torrents := make([]*types.Torrent, 0)
@@ -461,7 +462,7 @@ func (dl *DebridLink) GetMountPath() string {
 	return dl.MountPath
 }
 
-func (dl *DebridLink) GetAvailableSlots() (int, error) {
+func (dl *DebridLink) GetAvailableSlots(ctx context.Context) (int, error) {
 	//TODO: Implement the logic to check available slots for DebridLink
 	return 0, fmt.Errorf("GetAvailableSlots not implemented for DebridLink")
 }

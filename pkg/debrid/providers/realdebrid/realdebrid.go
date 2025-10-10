@@ -2,6 +2,7 @@ package realdebrid
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -761,7 +762,7 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, 
 	return totalItems, torrents, nil
 }
 
-func (r *RealDebrid) GetTorrents() ([]*types.Torrent, error) {
+func (r *RealDebrid) GetTorrents(ctx context.Context) ([]*types.Torrent, error) {
 	limit := 5000
 	if r.limit != 0 {
 		limit = r.limit
@@ -904,8 +905,11 @@ func (r *RealDebrid) GetProfile() (*types.Profile, error) {
 	return profile, nil
 }
 
-func (r *RealDebrid) GetAvailableSlots() (int, error) {
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/torrents/activeCount", r.Host), nil)
+func (r *RealDebrid) GetAvailableSlots(ctx context.Context) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/torrents/activeCount", r.Host), nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
 	resp, err := r.client.MakeRequest(req)
 	if err != nil {
 		return 0, nil
