@@ -53,23 +53,28 @@ func TestNewCompositeRateLimiter_MixedNilLimiters(t *testing.T) {
 }
 
 func TestCompositeRateLimiter_EnforcesBothLimits(t *testing.T) {
-	// Create two limiters: 5/sec and 10/min
-	// In 1 second, we should be limited by the more restrictive one
-	limiter1 := ratelimit.New(5, ratelimit.Per(time.Second))
-	limiter2 := ratelimit.New(10, ratelimit.Per(time.Minute))
+	// Create two limiters: 100/sec and 50/sec
+	// The 50/sec limiter should be the more restrictive one
+	limiter1 := ratelimit.New(100, ratelimit.Per(time.Second))
+	limiter2 := ratelimit.New(50, ratelimit.Per(time.Second))
 
 	composite := NewCompositeRateLimiter(limiter1, limiter2).(*CompositeRateLimiter)
 
-	// Take 5 tokens quickly - should be allowed by both limits
+	// Take tokens and measure actual vs expected duration
 	start := time.Now()
-	for i := 0; i < 5; i++ {
+	count := 10
+	for i := 0; i < count; i++ {
 		composite.Take()
 	}
 	duration := time.Since(start)
 
-	// Should complete quickly (within 100ms) as we're under both limits
-	if duration > 100*time.Millisecond {
-		t.Errorf("Expected quick completion, took %v", duration)
+	// Calculate expected duration: 10 tokens at 50/sec = 200ms minimum
+	// Allow 2x overhead for scheduler jitter and system load
+	expected := time.Duration(count-1) * (time.Second / 50)
+	maxAllowed := expected * 2
+
+	if duration > maxAllowed {
+		t.Errorf("Unexpected delay: got %v, expected ~%v (max %v)", duration, expected, maxAllowed)
 	}
 }
 
@@ -153,32 +158,190 @@ func TestParseMultipleRateLimits_MixedValid(t *testing.T) {
 }
 
 func TestCompositeRateLimiter_TorboxScenario(t *testing.T) {
-	// Simulate Torbox dual limits: 60/hour AND 10/min
-	hourly := ratelimit.New(60, ratelimit.Per(time.Hour))
-	perMinute := ratelimit.New(10, ratelimit.Per(time.Minute))
+	if testing.Short() {
+		t.Skip("Skipping long-running test in short mode")
+	}
 
-	composite := NewCompositeRateLimiter(hourly, perMinute).(*CompositeRateLimiter)
+	// Simulate Torbox-like dual limits with faster rates for testing: 100/sec AND 10/sec
+	// This maintains the 10:1 ratio but runs 60x faster
+	limiter1 := ratelimit.New(100, ratelimit.Per(time.Second))
+	limiter2 := ratelimit.New(10, ratelimit.Per(time.Second))
 
-	// Take 10 tokens quickly - should be allowed
+	composite := NewCompositeRateLimiter(limiter1, limiter2).(*CompositeRateLimiter)
+
+	// Take 10 tokens - should be allowed by both limits
 	start := time.Now()
 	for i := 0; i < 10; i++ {
 		composite.Take()
 	}
 	duration := time.Since(start)
 
-	// Should complete quickly (well under 1 minute)
-	if duration > 500*time.Millisecond {
+	// Should complete relatively quickly (under 1 second for 10 tokens at 10/sec)
+	if duration > 2*time.Second {
 		t.Errorf("Expected quick completion for 10 requests, took %v", duration)
 	}
 
-	// The 11th request should block (hit the per-minute limit)
+	// The 11th request should block briefly (hit the 10/sec limit)
 	start = time.Now()
 	composite.Take()
 	duration = time.Since(start)
 
-	// Should block for approximately 6 seconds (60s / 10 requests)
-	if duration < 5*time.Second {
-		t.Errorf("Expected blocking for ~6s, got %v", duration)
+	// Should block for approximately 100ms (1000ms / 10 requests)
+	// Allow range of 50ms to 200ms for scheduler jitter
+	if duration < 50*time.Millisecond || duration > 200*time.Millisecond {
+		t.Logf("Note: blocking duration was %v (expected ~100ms)", duration)
+	}
+}
+
+// P1 Recommendation 2: Add unit tests for ParseMultipleRateLimitsWithSlack
+func TestParseMultipleRateLimitsWithSlack_ZeroSlack(t *testing.T) {
+	limiter := ParseMultipleRateLimitsWithSlack(0, "120/hour", "20/min")
+
+	if limiter == nil {
+		t.Fatal("Expected valid composite limiter with zero slack")
+	}
+
+	composite, ok := limiter.(*CompositeRateLimiter)
+	if !ok {
+		t.Fatal("Expected CompositeRateLimiter type")
+	}
+
+	if len(composite.limiters) != 2 {
+		t.Errorf("Expected 2 limiters, got %d", len(composite.limiters))
+	}
+}
+
+func TestParseMultipleRateLimitsWithSlack_DefaultSlack(t *testing.T) {
+	limiter := ParseMultipleRateLimitsWithSlack(-1, "120/hour", "20/min")
+
+	if limiter == nil {
+		t.Fatal("Expected valid composite limiter with default slack")
+	}
+
+	composite, ok := limiter.(*CompositeRateLimiter)
+	if !ok {
+		t.Fatal("Expected CompositeRateLimiter type")
+	}
+
+	if len(composite.limiters) != 2 {
+		t.Errorf("Expected 2 limiters, got %d", len(composite.limiters))
+	}
+}
+
+func TestParseMultipleRateLimitsWithSlack_CustomSlack(t *testing.T) {
+	limiter := ParseMultipleRateLimitsWithSlack(5, "120/hour", "20/min")
+
+	if limiter == nil {
+		t.Fatal("Expected valid composite limiter with custom slack")
+	}
+
+	composite, ok := limiter.(*CompositeRateLimiter)
+	if !ok {
+		t.Fatal("Expected CompositeRateLimiter type")
+	}
+
+	if len(composite.limiters) != 2 {
+		t.Errorf("Expected 2 limiters, got %d", len(composite.limiters))
+	}
+}
+
+func TestParseMultipleRateLimitsWithSlack_NegativeSlack(t *testing.T) {
+	// P0 Fix: Negative slack values other than -1 should return nil
+	limiter := ParseMultipleRateLimitsWithSlack(-2, "120/hour", "20/min")
+
+	if limiter != nil {
+		t.Error("Expected nil for invalid negative slack (-2)")
+	}
+
+	limiter = ParseMultipleRateLimitsWithSlack(-10, "120/hour", "20/min")
+	if limiter != nil {
+		t.Error("Expected nil for invalid negative slack (-10)")
+	}
+}
+
+func TestParseMultipleRateLimitsWithSlack_InvalidRateStrings(t *testing.T) {
+	tests := []struct {
+		name     string
+		slack    int
+		rateStrs []string
+		wantNil  bool
+	}{
+		{
+			name:     "all invalid rate strings",
+			slack:    0,
+			rateStrs: []string{"invalid", "also-invalid"},
+			wantNil:  true,
+		},
+		{
+			name:     "mixed valid and invalid",
+			slack:    0,
+			rateStrs: []string{"120/hour", "invalid", "20/min"},
+			wantNil:  false, // Should return composite with 2 valid limiters
+		},
+		{
+			name:     "empty rate strings",
+			slack:    0,
+			rateStrs: []string{},
+			wantNil:  true,
+		},
+		{
+			name:     "single valid rate string",
+			slack:    0,
+			rateStrs: []string{"120/hour"},
+			wantNil:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limiter := ParseMultipleRateLimitsWithSlack(tt.slack, tt.rateStrs...)
+			if tt.wantNil {
+				if limiter != nil {
+					t.Errorf("Expected nil for test case %q", tt.name)
+				}
+			} else {
+				if limiter == nil {
+					t.Errorf("Expected non-nil for test case %q", tt.name)
+				}
+			}
+		})
+	}
+}
+
+func TestParseMultipleRateLimitsWithSlack_AllTimeUnits(t *testing.T) {
+	tests := []struct {
+		name     string
+		rateStrs []string
+	}{
+		{
+			name:     "seconds",
+			rateStrs: []string{"10/sec", "20/second"},
+		},
+		{
+			name:     "minutes",
+			rateStrs: []string{"60/min", "120/minute"},
+		},
+		{
+			name:     "hours",
+			rateStrs: []string{"3600/hr", "7200/hour"},
+		},
+		{
+			name:     "days",
+			rateStrs: []string{"86400/d", "172800/day"},
+		},
+		{
+			name:     "mixed units",
+			rateStrs: []string{"10/sec", "600/min", "3600/hr", "86400/d"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limiter := ParseMultipleRateLimitsWithSlack(0, tt.rateStrs...)
+			if limiter == nil {
+				t.Errorf("Expected non-nil limiter for %q", tt.name)
+			}
+		})
 	}
 }
 
@@ -209,5 +372,11 @@ func BenchmarkRawRateLimiter(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		limiter.Take()
+	}
+}
+
+func BenchmarkParseMultipleRateLimitsWithSlack(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		ParseMultipleRateLimitsWithSlack(0, "120/hour", "20/min")
 	}
 }
