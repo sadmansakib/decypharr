@@ -74,6 +74,24 @@ func TestGetTotalSlots(t *testing.T) {
 			additionalSlots: 10,
 			expected:        13,
 		},
+		{
+			name:            "Edge case: negative plan should default to plan 1",
+			plan:            -1,
+			additionalSlots: 0,
+			expected:        3,
+		},
+		{
+			name:            "Edge case: zero plan should default to plan 1",
+			plan:            0,
+			additionalSlots: 0,
+			expected:        3,
+		},
+		{
+			name:            "Edge case: negative plan with bonus slots",
+			plan:            -5,
+			additionalSlots: 10,
+			expected:        13, // 3 base (plan 1) + 10 bonus
+		},
 	}
 
 	for _, tt := range tests {
