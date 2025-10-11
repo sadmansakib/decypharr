@@ -100,10 +100,11 @@ func WithRateLimiter(rl ratelimit.Limiter) ClientOption {
 //   - limiter: Rate limiter to apply (can be a CompositeRateLimiter for dual limits)
 //
 // Example:
-//   client := New(
-//     WithEndpointLimiter("POST", `^/api/torrents/createtorrent`,
-//       ParseMultipleRateLimits("60/hour", "10/min")),
-//   )
+//
+//	client := New(
+//	  WithEndpointLimiter("POST", `^/api/torrents/createtorrent`,
+//	    ParseMultipleRateLimits("60/hour", "10/min")),
+//	)
 func WithEndpointLimiter(method, pattern string, limiter ratelimit.Limiter) ClientOption {
 	return func(c *Client) {
 		if c.endpointLimiters == nil {
@@ -361,10 +362,31 @@ func New(options ...ClientOption) *Client {
 	return client
 }
 
+// ParseRateLimit parses a rate limit string and returns a rate limiter with default 10% slack
 func ParseRateLimit(rateStr string) ratelimit.Limiter {
+	return ParseRateLimitWithSlack(rateStr, -1)
+}
+
+// ParseRateLimitWithSlack parses a rate limit string and returns a rate limiter with custom slack
+// P1 Fix: Added to support zero slack for critical endpoints like TorBox /requestdl
+//
+// Parameters:
+//   - rateStr: Rate limit string (e.g., "120/hour", "20/min")
+//   - slack: Slack size (0 for no slack, -1 for 10% default)
+//
+// Example:
+//
+//	limiter := ParseRateLimitWithSlack("120/hour", 0) // No slack for strict rate limiting
+func ParseRateLimitWithSlack(rateStr string, slack int) ratelimit.Limiter {
 	if rateStr == "" {
 		return nil
 	}
+
+	// P0 Fix: Validate slack parameter - reject negative values other than -1
+	if slack < -1 {
+		return nil
+	}
+
 	parts := strings.SplitN(rateStr, "/", 2)
 	if len(parts) != 2 {
 		return nil
@@ -376,8 +398,20 @@ func ParseRateLimit(rateStr string) ratelimit.Limiter {
 		return nil
 	}
 
-	// Set slack size to 10%
-	slackSize := count / 10
+	// Edge case: Prevent integer overflow and unrealistic rate limits
+	// Max 10 million requests per period (reasonable upper bound)
+	if count > 10000000 {
+		return nil
+	}
+
+	// Calculate slack size
+	var slackSize int
+	if slack == -1 {
+		// Default 10% slack
+		slackSize = count / 10
+	} else {
+		slackSize = slack
+	}
 
 	// normalize unit
 	unit := strings.ToLower(strings.TrimSpace(parts[1]))
@@ -440,41 +474,46 @@ func isRetryableError(err error) bool {
 }
 
 func SetProxy(transport *http.Transport, proxyURL string) {
+	log := logger.New("request")
+
 	if proxyURL != "" {
 		if strings.HasPrefix(proxyURL, "socks5://") {
 			// Handle SOCKS5 proxy
 			socksURL, err := url.Parse(proxyURL)
 			if err != nil {
+				log.Warn().Err(err).Str("proxy_url", proxyURL).Msg("Failed to parse SOCKS5 proxy URL")
 				return
-			} else {
-				auth := &proxy.Auth{}
-				if socksURL.User != nil {
-					auth.User = socksURL.User.Username()
-					password, _ := socksURL.User.Password()
-					auth.Password = password
-				}
-
-				dialer, err := proxy.SOCKS5("tcp", socksURL.Host, auth, proxy.Direct)
-				if err != nil {
-					return
-				} else {
-					transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-						return dialer.Dial(network, addr)
-					}
-				}
 			}
+
+			auth := &proxy.Auth{}
+			if socksURL.User != nil {
+				auth.User = socksURL.User.Username()
+				password, _ := socksURL.User.Password()
+				auth.Password = password
+			}
+
+			dialer, err := proxy.SOCKS5("tcp", socksURL.Host, auth, proxy.Direct)
+			if err != nil {
+				log.Warn().Err(err).Str("proxy_url", proxyURL).Msg("Failed to create SOCKS5 dialer")
+				return
+			}
+
+			transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialer.Dial(network, addr)
+			}
+			log.Debug().Str("proxy_url", proxyURL).Msg("SOCKS5 proxy configured")
 		} else {
 			_proxy, err := url.Parse(proxyURL)
 			if err != nil {
+				log.Warn().Err(err).Str("proxy_url", proxyURL).Msg("Failed to parse HTTP proxy URL")
 				return
-			} else {
-				transport.Proxy = http.ProxyURL(_proxy)
 			}
+			transport.Proxy = http.ProxyURL(_proxy)
+			log.Debug().Str("proxy_url", proxyURL).Msg("HTTP proxy configured")
 		}
 	} else {
 		transport.Proxy = http.ProxyFromEnvironment
 	}
-	return
 }
 
 func ValidateURL(urlStr string) error {

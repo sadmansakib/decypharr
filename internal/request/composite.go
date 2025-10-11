@@ -61,13 +61,38 @@ func (c *CompositeRateLimiter) Take() time.Time {
 // This is useful for endpoints with multiple simultaneous rate limits.
 //
 // Example:
-//   limiter := ParseMultipleRateLimits("60/hour", "10/min")
-//   // This creates a limiter that enforces BOTH limits
+//
+//	limiter := ParseMultipleRateLimits("60/hour", "10/min")
+//	// This creates a limiter that enforces BOTH limits
 func ParseMultipleRateLimits(rateStrs ...string) ratelimit.Limiter {
 	limiters := make([]ratelimit.Limiter, 0, len(rateStrs))
 
 	for _, rateStr := range rateStrs {
 		limiter := ParseRateLimit(rateStr)
+		if limiter != nil {
+			limiters = append(limiters, limiter)
+		}
+	}
+
+	return NewCompositeRateLimiter(limiters...)
+}
+
+// ParseMultipleRateLimitsWithSlack parses multiple rate limit strings with custom slack
+// and returns a composite limiter. P1 Fix for TorBox /requestdl endpoint.
+//
+// Parameters:
+//   - slack: Slack size for all limiters (0 for no slack, -1 for 10% default)
+//   - rateStrs: Rate limit strings (e.g., "120/hour", "20/min")
+//
+// Example:
+//
+//	limiter := ParseMultipleRateLimitsWithSlack(0, "120/hour", "20/min")
+//	// This creates a composite limiter with zero slack for strict rate limiting
+func ParseMultipleRateLimitsWithSlack(slack int, rateStrs ...string) ratelimit.Limiter {
+	limiters := make([]ratelimit.Limiter, 0, len(rateStrs))
+
+	for _, rateStr := range rateStrs {
+		limiter := ParseRateLimitWithSlack(rateStr, slack)
 		if limiter != nil {
 			limiters = append(limiters, limiter)
 		}
