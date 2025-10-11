@@ -53,6 +53,12 @@ var torboxSlotConfig = map[int]int{
 // getTotalSlots calculates the total number of slots available for a user
 // based on their plan and additional concurrent slots
 func getTotalSlots(plan int, additionalSlots int) int {
+	// Validate plan ID
+	if plan < 0 {
+		// Negative plan IDs are invalid, default to plan 1
+		plan = 1
+	}
+
 	baseSlots, exists := torboxSlotConfig[plan]
 	if !exists {
 		// Default to plan 1 if unknown plan type
@@ -69,7 +75,15 @@ func getTotalSlots(plan int, additionalSlots int) int {
 		additionalSlots = 1000
 	}
 
-	return baseSlots + additionalSlots
+	totalSlots := baseSlots + additionalSlots
+
+	// Edge case: Prevent integer overflow (extremely unlikely but defensive)
+	if totalSlots < baseSlots {
+		// Overflow detected, cap at reasonable maximum
+		return 1000
+	}
+
+	return totalSlots
 }
 
 type Torbox struct {
@@ -144,11 +158,13 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 			`^/v1/api/webdl/createwebdownload`,
 			request.ParseMultipleRateLimits("60/hour", "10/min"),
 		),
-		// requestdl endpoint - download link generation (frequently used by WebDAV)
+		// P1 Fix: requestdl endpoint with zero slack for strict rate limiting
+		// This endpoint is frequently used by WebDAV for download link generation
+		// Zero slack prevents burst requests that trigger 429 errors
 		request.WithEndpointLimiter(
 			"GET",
 			`^/v1/api/torrents/requestdl`,
-			request.ParseMultipleRateLimits("120/hour", "20/min"),
+			request.ParseMultipleRateLimitsWithSlack(0, "120/hour", "20/min"),
 		),
 		// mylist endpoint - torrent status checks (very frequent)
 		request.WithEndpointLimiter(
