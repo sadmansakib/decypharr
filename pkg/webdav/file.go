@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -146,10 +147,28 @@ func (f *File) StreamResponse(w http.ResponseWriter, r *http.Request) error {
 	resp, err := f.cache.Stream(r.Context(), start, end, f.getDownloadLink)
 	if err != nil {
 		_logger.Error().Err(err).Str("file", f.name).Msg("Failed to stream with initial link")
-		// Invalidate cached link on error
-		if f.handler != nil {
+
+		// P1 Fix: Use typed errors instead of string matching for error detection
+		shouldInvalidate := false
+
+		// Check for specific error types using errors.Is()
+		if errors.Is(err, store.ErrLinkNotFound) || errors.Is(err, store.ErrBandwidthExceeded) {
+			shouldInvalidate = true
+			_logger.Debug().
+				Str("file", f.name).
+				Err(err).
+				Msg("Invalidating cached link due to link expiration/invalidity")
+		} else {
+			_logger.Debug().
+				Str("file", f.name).
+				Err(err).
+				Msg("Preserving cached link - error appears to be temporary (rate limit/server error)")
+		}
+
+		if shouldInvalidate && f.handler != nil {
 			f.handler.invalidateCachedDownloadLink(f.torrentName, f.name)
 		}
+
 		return &streamError{Err: err, StatusCode: http.StatusRequestedRangeNotSatisfiable}
 	}
 	defer func(Body io.ReadCloser) {
