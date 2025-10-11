@@ -16,7 +16,27 @@ import (
 
 const (
 	MaxNetworkRetries = 5
-	MaxLinkRetries    = 10
+	// MaxLinkRetries reduced from 10 to 3 to minimize cascading API calls during rate limiting
+	// This reduces API calls from 11 to 4 per stream attempt (P1 rate limiting fix)
+	MaxLinkRetries = 3
+
+	// jitterPercent defines the percentage of jitter to apply to backoff durations (±20%)
+	jitterPercent = 0.2
+)
+
+// P1 Fix: Define sentinel errors for typed error checking
+var (
+	// ErrLinkNotFound indicates the download link has expired or is invalid (404/410)
+	ErrLinkNotFound = errors.New("download link not found")
+
+	// ErrBandwidthExceeded indicates bandwidth/traffic limit exceeded
+	ErrBandwidthExceeded = errors.New("bandwidth limit exceeded")
+
+	// ErrRateLimit indicates rate limiting from the provider (429)
+	ErrRateLimit = errors.New("rate limit exceeded")
+
+	// ErrServerError indicates a server-side error (5xx)
+	ErrServerError = errors.New("server error")
 )
 
 type StreamError struct {
@@ -27,6 +47,10 @@ type StreamError struct {
 
 func (e StreamError) Error() string {
 	return e.Err.Error()
+}
+
+func (e StreamError) Unwrap() error {
+	return e.Err
 }
 
 // isConnectionError checks if the error is related to connection issues
@@ -73,21 +97,31 @@ func (c *Cache) Stream(ctx context.Context, start, end int64, linkFunc func() (t
 			c.logger.Trace().
 				Int("retries", retry).
 				Err(err).
-				Msg("Network request failed, retrying")
+				Msg("Network request failed")
 
-			// Backoff and continue network retry
-			if retry < MaxLinkRetries {
-				backoff := time.Duration(retry+1) * time.Second
-				jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
+			// Apply exponential backoff with jitter after failure and before next retry
+			if retry < MaxLinkRetries-1 {
+				// Exponential backoff: 1s, 2s, 4s with ±20% jitter
+				backoffDuration := time.Duration(1<<uint(retry)) * time.Second
+				jitterRange := float64(backoffDuration) * jitterPercent * 2
+				jitterOffset := float64(backoffDuration) * jitterPercent
+				jitter := time.Duration(rand.Float64()*jitterRange - jitterOffset)
+				sleepDuration := backoffDuration + jitter
+
+				c.logger.Trace().
+					Int("retry", retry).
+					Dur("backoff", backoffDuration).
+					Dur("jitter", jitter).
+					Dur("total_sleep", sleepDuration).
+					Msg("Applying exponential backoff after failure")
+
 				select {
-				case <-time.After(backoff + jitter):
+				case <-time.After(sleepDuration):
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
-				continue
-			} else {
-				return nil, fmt.Errorf("network request failed after retries: %w", lastErr)
 			}
+			continue
 		}
 
 		// Got response - check status
@@ -131,7 +165,7 @@ func (c *Cache) Stream(ctx context.Context, start, end int64, linkFunc func() (t
 			continue
 		}
 
-		// Retryable HTTP error (429, 503, etc.) - retry network
+		// Retryable HTTP error (429, 503, etc.) - apply backoff before retry
 		lastErr = streamErr
 		c.logger.Trace().
 			Err(lastErr).
@@ -139,13 +173,29 @@ func (c *Cache) Stream(ctx context.Context, start, end int64, linkFunc func() (t
 			Str("link", downloadLink.Link).
 			Int("retries", retry).
 			Int("statusCode", resp.StatusCode).
-			Msg("HTTP error, retrying")
+			Msg("HTTP error, will retry after backoff")
 
-		if retry < MaxNetworkRetries-1 {
-			backoff := time.Duration(retry+1) * time.Second
-			jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
+		// Apply exponential backoff before next retry
+		if retry < MaxLinkRetries-1 {
+			// Exponential backoff: 1s, 2s, 4s, capped at 10s with ±20% jitter
+			backoffDuration := time.Duration(1<<uint(retry)) * time.Second
+			if backoffDuration > 10*time.Second {
+				backoffDuration = 10 * time.Second
+			}
+			jitterRange := float64(backoffDuration) * jitterPercent * 2
+			jitterOffset := float64(backoffDuration) * jitterPercent
+			jitter := time.Duration(rand.Float64()*jitterRange - jitterOffset)
+			sleepDuration := backoffDuration + jitter
+
+			c.logger.Trace().
+				Int("retry", retry).
+				Dur("backoff", backoffDuration).
+				Dur("jitter", jitter).
+				Dur("total_sleep", sleepDuration).
+				Msg("Applying exponential backoff for HTTP error")
+
 			select {
-			case <-time.After(backoff + jitter):
+			case <-time.After(sleepDuration):
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
@@ -174,6 +224,13 @@ func (c *Cache) doRequest(ctx context.Context, url string, start, end int64) (*h
 	var lastErr error
 	// Retry loop specifically for connection-level failures (EOF, reset, etc.)
 	for connRetry := 0; connRetry < 3; connRetry++ {
+		// Check context cancellation before each retry
+		select {
+		case <-ctx.Done():
+			return nil, StreamError{Err: ctx.Err(), Retryable: false}
+		default:
+		}
+
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return nil, StreamError{Err: err, Retryable: false}
@@ -199,8 +256,25 @@ func (c *Cache) doRequest(ctx context.Context, url string, start, end int64) (*h
 
 			// Check if it's a connection error that we should retry
 			if c.isConnectionError(err) && connRetry < 2 {
-				// Brief backoff before retrying with fresh connection
-				time.Sleep(time.Duration(connRetry+1) * 100 * time.Millisecond)
+				// Exponential backoff: 100ms, 200ms, 400ms with ±20% jitter
+				backoffDuration := time.Duration(100<<uint(connRetry)) * time.Millisecond
+				jitterRange := float64(backoffDuration) * jitterPercent * 2
+				jitterOffset := float64(backoffDuration) * jitterPercent
+				jitter := time.Duration(rand.Float64()*jitterRange - jitterOffset)
+				sleepDuration := backoffDuration + jitter
+
+				c.logger.Trace().
+					Int("retry", connRetry).
+					Dur("backoff", backoffDuration).
+					Dur("jitter", jitter).
+					Dur("total_sleep", sleepDuration).
+					Msg("Connection error, applying exponential backoff")
+
+				select {
+				case <-time.After(sleepDuration):
+				case <-ctx.Done():
+					return nil, StreamError{Err: ctx.Err(), Retryable: false}
+				}
 				continue
 			}
 
@@ -234,7 +308,7 @@ func (c *Cache) handleHTTPError(resp *http.Response, downloadLink types.Download
 		// Max validation retries reached, mark as invalid
 		c.MarkLinkAsInvalid(downloadLink, "link_not_found")
 		return StreamError{
-			Err:       errors.New("download link not found"),
+			Err:       ErrLinkNotFound, // P1 Fix: Use sentinel error
 			Retryable: true,
 			LinkError: true, // Fetch new link
 		}
@@ -244,7 +318,7 @@ func (c *Cache) handleHTTPError(resp *http.Response, downloadLink types.Download
 			// Bandwidth errors should immediately mark as invalid (no validation retry)
 			c.MarkLinkAsInvalid(downloadLink, "bandwidth_exceeded")
 			return StreamError{
-				Err:       errors.New("bandwidth limit exceeded"),
+				Err:       ErrBandwidthExceeded, // P1 Fix: Use sentinel error
 				Retryable: true,
 				LinkError: true,
 			}
@@ -253,16 +327,23 @@ func (c *Cache) handleHTTPError(resp *http.Response, downloadLink types.Download
 
 	case http.StatusTooManyRequests:
 		return StreamError{
-			Err:       fmt.Errorf("HTTP %d: rate limited", resp.StatusCode),
+			Err:       fmt.Errorf("%w: HTTP %d", ErrRateLimit, resp.StatusCode), // P1 Fix: Wrap sentinel error
 			Retryable: true,
 			LinkError: false,
 		}
 
 	default:
 		retryable := resp.StatusCode >= 500
+		if retryable {
+			return StreamError{
+				Err:       fmt.Errorf("%w: HTTP %d: %s", ErrServerError, resp.StatusCode, string(body)), // P1 Fix: Wrap sentinel error
+				Retryable: true,
+				LinkError: false,
+			}
+		}
 		return StreamError{
 			Err:       fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body)),
-			Retryable: retryable,
+			Retryable: false,
 			LinkError: false,
 		}
 	}
