@@ -2,19 +2,19 @@ package logger
 
 import (
 	"fmt"
-	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"gopkg.in/natefinch/lumberjack.v2"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/config"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var (
-	once   sync.Once
-	logger zerolog.Logger
-)
+var defaultLogger = sync.OnceValue(func() zerolog.Logger {
+	return New("decypharr")
+})
 
 func GetLogPath() string {
 	cfg := config.Get()
@@ -107,8 +107,5 @@ func New(prefix string) zerolog.Logger {
 }
 
 func Default() zerolog.Logger {
-	once.Do(func() {
-		logger = New("decypharr")
-	})
-	return logger
+	return defaultLogger()
 }
