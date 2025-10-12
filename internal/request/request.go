@@ -290,7 +290,7 @@ func (c *Client) MakeRequest(req *http.Request) ([]byte, error) {
 
 	defer func() {
 		if err := res.Body.Close(); err != nil {
-			c.logger.Printf("Failed to close response body: %v", err)
+			c.logger.Error().Err(err).Msg("Failed to close response body")
 		}
 	}()
 
@@ -306,8 +306,8 @@ func (c *Client) MakeRequest(req *http.Request) ([]byte, error) {
 	return bodyBytes, nil
 }
 
-func (c *Client) Get(url string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func (c *Client) Get(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating GET request: %w", err)
 	}
