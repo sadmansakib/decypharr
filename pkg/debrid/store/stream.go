@@ -157,7 +157,10 @@ func (c *Cache) Stream(ctx context.Context, start, end int64, linkFunc func() (t
 			// Record the retry attempt for exponential backoff
 			c.recordInvalidLinkRetry(downloadLink.DownloadLink)
 
-			// Try new link
+			// Try new link - don't count validation retries against link retry budget
+			// Reset retry counter since we're starting fresh with a new link
+			retry = -1 // Will be incremented to 0 at top of loop
+
 			downloadLink, err = linkFunc()
 			if err != nil {
 				return nil, fmt.Errorf("failed to get download link: %w", err)
@@ -312,6 +315,34 @@ func (c *Cache) handleHTTPError(resp *http.Response, downloadLink types.Download
 			Retryable: true,
 			LinkError: true, // Fetch new link
 		}
+
+	case http.StatusBadRequest:
+		// Handle TorBox's "Invalid Presigned Token" error
+		if strings.Contains(bodyStr, "invalid presigned token") ||
+		   strings.Contains(bodyStr, "presigned") {
+			// Try to validate the link before marking it invalid
+			if c.shouldValidateLink(downloadLink.DownloadLink) {
+				// Retry with the same link (validation attempt)
+				c.logger.Debug().
+					Str("downloadLink", downloadLink.DownloadLink).
+					Msg("Link returned 400 (invalid presigned token), retrying for validation")
+				return StreamError{
+					Err:       errors.New("invalid presigned token, retrying for validation"),
+					Retryable: true,
+					LinkError: false, // Don't fetch new link yet, retry same link
+				}
+			}
+
+			// Max validation retries reached, mark as invalid
+			c.MarkLinkAsInvalid(downloadLink, "invalid_presigned_token")
+			return StreamError{
+				Err:       fmt.Errorf("invalid presigned token: %w", ErrLinkNotFound),
+				Retryable: true,
+				LinkError: true, // Fetch new link
+			}
+		}
+		// Fall through to default for other 400 errors
+		fallthrough
 
 	case http.StatusServiceUnavailable:
 		if strings.Contains(bodyStr, "bandwidth") || strings.Contains(bodyStr, "traffic") {
