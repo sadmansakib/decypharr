@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -93,7 +94,7 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (types
 	}
 
 	c.logger.Trace().Msgf("Getting download link for %s(%s)", filename, file.Link)
-	downloadLink, err := c.client.GetDownloadLink(ct.Torrent, &file)
+	downloadLink, err := c.client.GetDownloadLink(context.Background(), ct.Torrent, &file)
 	if err != nil {
 		if errors.Is(err, utils.TorrentNotFoundError) {
 			// Torrent has been deleted from the debrid provider (e.g., Torbox DATABASE_ERROR)
@@ -124,7 +125,7 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (types
 				return emptyDownloadLink, fmt.Errorf("file %s not found in reinserted torrent %s", filename, torrentName)
 			}
 			// Retry getting the download link
-			downloadLink, err = c.client.GetDownloadLink(ct.Torrent, &file)
+			downloadLink, err = c.client.GetDownloadLink(context.Background(), ct.Torrent, &file)
 			if err != nil {
 				return emptyDownloadLink, fmt.Errorf("retry failed to get download link: %w", err)
 			}
@@ -146,7 +147,7 @@ func (c *Cache) fetchDownloadLink(torrentName, filename, fileLink string) (types
 }
 
 func (c *Cache) GetFileDownloadLinks(t CachedTorrent) {
-	if err := c.client.GetFileDownloadLinks(t.Torrent); err != nil {
+	if err := c.client.GetFileDownloadLinks(context.Background(), t.Torrent); err != nil {
 		c.logger.Error().Err(err).Str("torrent", t.Name).Msg("Failed to generate download links")
 		return
 	}
@@ -257,6 +258,15 @@ func (c *Cache) recordInvalidLinkRetry(downloadLink string) {
 		}, true
 	})
 
+	// LoadOrCompute might return nil in some edge cases, handle it
+	if info == nil {
+		info = &linkRetryInfo{
+			retryCount:   0,
+			lastAttempt:  time.Now(),
+			downloadLink: downloadLink,
+		}
+	}
+
 	info.retryCount++
 	info.lastAttempt = time.Now()
 	c.linkRetryTracker.Store(downloadLink, info)
@@ -272,12 +282,12 @@ func (c *Cache) recordInvalidLinkRetry(downloadLink string) {
 func (c *Cache) shouldValidateLink(downloadLink string) bool {
 	retry, ok := c.linkValidationRetry.Load(downloadLink)
 	if !ok {
-		// First validation attempt
+		// First validation retry - start counter at 1 (this IS the first retry)
 		c.linkValidationRetry.Store(downloadLink, &validationRetry{
 			attemptCount: 1,
 			firstAttempt: time.Now(),
 		})
-		return true // Allow first attempt
+		return true // Allow first retry
 	}
 
 	// Check if validation window has expired (reset counter)
@@ -292,17 +302,20 @@ func (c *Cache) shouldValidateLink(downloadLink string) bool {
 		return true
 	}
 
-	// Check if we've exceeded max validation retries
+	// Increment attempt counter first
+	retry.attemptCount++
+
+	// Check if we've reached max validation retries
+	// After MaxValidationRetries attempts, we should fetch a new link
 	if retry.attemptCount >= MaxValidationRetries {
 		c.logger.Debug().
 			Str("downloadLink", downloadLink).
 			Int32("attemptCount", retry.attemptCount).
 			Msg("Max validation retries reached, marking link as invalid")
+		c.linkValidationRetry.Store(downloadLink, retry) // Store the updated count
 		return false
 	}
 
-	// Increment attempt counter
-	retry.attemptCount++
 	c.linkValidationRetry.Store(downloadLink, retry)
 
 	c.logger.Debug().
