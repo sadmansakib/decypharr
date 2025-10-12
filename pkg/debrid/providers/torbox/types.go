@@ -30,7 +30,7 @@ func (r *APIResponse[T]) ParseErrorCode() string {
 	switch v := r.Error.(type) {
 	case string:
 		return v
-	case map[string]interface{}:
+	case map[string]any:
 		if code, ok := v["code"].(string); ok {
 			return code
 		}
@@ -56,7 +56,7 @@ type AddMagnetResponse APIResponse[struct {
 // TorboxFile represents a file within a torrent
 type TorboxFile struct {
 	Id           int         `json:"id"`
-	Md5          interface{} `json:"md5"`
+	Md5          any `json:"md5"`
 	Hash         string      `json:"hash"`
 	Name         string      `json:"name"`
 	Size         int64       `json:"size"`
@@ -74,7 +74,7 @@ type torboxInfo struct {
 	Server          int         `json:"server"`
 	Hash            string      `json:"hash"`
 	Name            string      `json:"name"`
-	Magnet          interface{} `json:"magnet"`
+	Magnet          any `json:"magnet"`
 	Size            int64       `json:"size"`
 	Active          bool        `json:"active"`
 	CreatedAt       time.Time   `json:"created_at"`
@@ -88,14 +88,14 @@ type torboxInfo struct {
 	UploadSpeed     int         `json:"upload_speed"`
 	Eta             int         `json:"eta"`
 	TorrentFile     bool        `json:"torrent_file"`
-	ExpiresAt       interface{} `json:"expires_at"`
+	ExpiresAt       any `json:"expires_at"`
 	DownloadPresent bool         `json:"download_present"`
 	Files           []TorboxFile `json:"files"`
 	DownloadPath    string       `json:"download_path"`
 	InactiveCheck    int         `json:"inactive_check"`
 	Availability     float64     `json:"availability"`
 	DownloadFinished bool        `json:"download_finished"`
-	Tracker          interface{} `json:"tracker"`
+	Tracker          any `json:"tracker"`
 	TotalUploaded    int         `json:"total_uploaded"`
 	TotalDownloaded  int         `json:"total_downloaded"`
 	Cached           bool        `json:"cached"`
@@ -103,7 +103,7 @@ type torboxInfo struct {
 	SeedTorrent      bool        `json:"seed_torrent"`
 	AllowZipped      bool        `json:"allow_zipped"`
 	LongTermSeeding  bool        `json:"long_term_seeding"`
-	TrackerMessage   interface{} `json:"tracker_message"`
+	TrackerMessage   any `json:"tracker_message"`
 }
 
 type InfoResponse APIResponse[torboxInfo]

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -106,7 +107,7 @@ func (d *Storage) Debrid(name string) *Debrid {
 
 func (d *Storage) StartWorker(ctx context.Context) error {
 	if ctx == nil {
-		ctx = context.Background()
+		return fmt.Errorf("context cannot be nil for StartWorker")
 	}
 
 	// Start syncAccounts worker
@@ -119,10 +120,8 @@ func (d *Storage) StartWorker(ctx context.Context) error {
 }
 
 func (d *Storage) checkBandwidthWorker(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
 	go func() {
 		for {
 			select {
@@ -152,26 +151,23 @@ func (d *Storage) checkAccountBandwidth() {
 }
 
 func (d *Storage) syncAccountsWorker(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	_ = d.syncAccounts()
+	_ = d.syncAccounts(ctx)
 	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_ = d.syncAccounts()
+				_ = d.syncAccounts(ctx)
 			}
 		}
 	}()
 
 }
 
-func (d *Storage) syncAccounts() error {
+func (d *Storage) syncAccounts(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -180,7 +176,7 @@ func (d *Storage) syncAccounts() error {
 			continue
 		}
 		_log := debrid.client.Logger()
-		if err := debrid.client.SyncAccounts(); err != nil {
+		if err := debrid.client.SyncAccounts(ctx); err != nil {
 			_log.Error().Err(err).Msgf("Failed to sync account for %s", name)
 			continue
 		}
@@ -191,10 +187,11 @@ func (d *Storage) syncAccounts() error {
 func (d *Storage) Debrids() map[string]*Debrid {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	debridsCopy := make(map[string]*Debrid)
-	for name, debrid := range d.debrids {
-		if debrid != nil {
-			debridsCopy[name] = debrid
+	// Use maps.Clone for efficient map cloning, then filter out nil entries
+	debridsCopy := maps.Clone(d.debrids)
+	for name, debrid := range debridsCopy {
+		if debrid == nil {
+			delete(debridsCopy, name)
 		}
 	}
 	return debridsCopy
@@ -220,15 +217,16 @@ func (d *Storage) Reset() {
 		}
 	}
 
-	// Reinitialize the debrids map
-	d.debrids = make(map[string]*Debrid)
+	// Clear the debrids map using built-in clear()
+	clear(d.debrids)
 	d.lastUsed = ""
 }
 
 func (d *Storage) Clients() map[string]common.Client {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	clientsCopy := make(map[string]common.Client)
+	// Build filtered map of clients
+	clientsCopy := make(map[string]common.Client, len(d.debrids))
 	for name, debrid := range d.debrids {
 		if debrid != nil && debrid.client != nil {
 			clientsCopy[name] = debrid.client
@@ -240,7 +238,8 @@ func (d *Storage) Clients() map[string]common.Client {
 func (d *Storage) Caches() map[string]*debridStore.Cache {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	cachesCopy := make(map[string]*debridStore.Cache)
+	// Build filtered map of caches
+	cachesCopy := make(map[string]*debridStore.Cache, len(d.debrids))
 	for name, debrid := range d.debrids {
 		if debrid != nil && debrid.cache != nil {
 			cachesCopy[name] = debrid.cache
@@ -252,7 +251,8 @@ func (d *Storage) Caches() map[string]*debridStore.Cache {
 func (d *Storage) FilterClients(filter func(common.Client) bool) map[string]common.Client {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	filteredClients := make(map[string]common.Client)
+	// Build filtered map of clients based on filter function
+	filteredClients := make(map[string]common.Client, len(d.debrids))
 	for name, client := range d.debrids {
 		if client != nil && filter(client.client) {
 			filteredClients[name] = client.client
@@ -335,7 +335,7 @@ func Process(ctx context.Context, store *Storage, selectedDebrid string, magnet 
 			debridTorrent.DownloadUncached = db.GetDownloadUncached()
 		}
 
-		dbt, err := db.SubmitMagnet(debridTorrent)
+		dbt, err := db.SubmitMagnet(ctx, debridTorrent)
 		if err != nil || dbt == nil || dbt.Id == "" {
 			errs = append(errs, err)
 			continue
@@ -344,11 +344,11 @@ func Process(ctx context.Context, store *Storage, selectedDebrid string, magnet 
 		_logger.Info().Str("id", dbt.Id).Msgf("Torrent: %s submitted to %s", dbt.Name, db.Name())
 		store.lastUsed = db.Name()
 
-		torrent, err := db.CheckStatus(dbt)
+		torrent, err := db.CheckStatus(ctx, dbt)
 		if err != nil && torrent != nil && torrent.Id != "" {
 			// Delete the torrent if it was not downloaded
 			go func(id string) {
-				_ = db.DeleteTorrent(id)
+				_ = db.DeleteTorrent(ctx, id)
 			}(torrent.Id)
 		}
 		if err != nil {
@@ -364,6 +364,5 @@ func Process(ctx context.Context, store *Storage, selectedDebrid string, magnet 
 	if len(errs) == 0 {
 		return nil, fmt.Errorf("failed to process torrent: no clients available")
 	}
-	joinedErrors := errors.Join(errs...)
-	return nil, fmt.Errorf("failed to process torrent: %w", joinedErrors)
+	return nil, fmt.Errorf("failed to process torrent: %w", errors.Join(errs...))
 }

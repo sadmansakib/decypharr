@@ -79,7 +79,7 @@ func (ad *AllDebrid) Logger() zerolog.Logger {
 	return ad.logger
 }
 
-func (ad *AllDebrid) IsAvailable(hashes []string) map[string]bool {
+func (ad *AllDebrid) IsAvailable(ctx context.Context, hashes []string) map[string]bool {
 	// Check if the infohashes are available in the local cache
 	result := make(map[string]bool)
 
@@ -88,12 +88,15 @@ func (ad *AllDebrid) IsAvailable(hashes []string) map[string]bool {
 	return result
 }
 
-func (ad *AllDebrid) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
+func (ad *AllDebrid) SubmitMagnet(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
 	url := fmt.Sprintf("%s/magnet/upload", ad.Host)
 	query := gourl.Values{}
 	query.Add("magnets[]", torrent.Magnet.Link)
 	url += "?" + query.Encode()
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
 	resp, err := ad.client.MakeRequest(req)
 	if err != nil {
 		return nil, err
@@ -180,9 +183,12 @@ func (ad *AllDebrid) flattenFiles(torrentId string, files []MagnetFile, parentPa
 	return result
 }
 
-func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
+func (ad *AllDebrid) GetTorrent(ctx context.Context, torrentId string) (*types.Torrent, error) {
 	url := fmt.Sprintf("%s/magnet/status?id=%s", ad.Host, torrentId)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
 	resp, err := ad.client.MakeRequest(req)
 	if err != nil {
 		return nil, err
@@ -222,9 +228,12 @@ func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 	return t, nil
 }
 
-func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
+func (ad *AllDebrid) UpdateTorrent(ctx context.Context, t *types.Torrent) error {
 	url := fmt.Sprintf("%s/magnet/status?id=%s", ad.Host, t.Id)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
 	resp, err := ad.client.MakeRequest(req)
 	if err != nil {
 		return err
@@ -260,34 +269,44 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 	return nil
 }
 
-func (ad *AllDebrid) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
+func (ad *AllDebrid) CheckStatus(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
 	for {
-		err := ad.UpdateTorrent(torrent)
+		select {
+		case <-ctx.Done():
+			return torrent, fmt.Errorf("context cancelled during status check: %w", ctx.Err())
+		case <-ticker.C:
+			err := ad.UpdateTorrent(ctx, torrent)
 
-		if err != nil || torrent == nil {
-			return torrent, err
-		}
-		status := torrent.Status
-		if status == "downloaded" {
-			ad.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
-			return torrent, nil
-		} else if utils.Contains(ad.GetDownloadingStatus(), status) {
-			if !torrent.DownloadUncached {
-				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
+			if err != nil || torrent == nil {
+				return torrent, err
 			}
-			// Break out of the loop if the torrent is downloading.
-			// This is necessary to prevent infinite loop since we moved to sync downloading and async processing
-			return torrent, nil
-		} else {
-			return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
+			status := torrent.Status
+			if status == "downloaded" {
+				ad.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
+				return torrent, nil
+			} else if utils.Contains(ad.GetDownloadingStatus(), status) {
+				if !torrent.DownloadUncached {
+					return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
+				}
+				// Break out of the loop if the torrent is downloading.
+				// This is necessary to prevent infinite loop since we moved to sync downloading and async processing
+				return torrent, nil
+			} else {
+				return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
+			}
 		}
-
 	}
 }
 
-func (ad *AllDebrid) DeleteTorrent(torrentId string) error {
+func (ad *AllDebrid) DeleteTorrent(ctx context.Context, torrentId string) error {
 	url := fmt.Sprintf("%s/magnet/delete?id=%s", ad.Host, torrentId)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
 	if _, err := ad.client.MakeRequest(req); err != nil {
 		return err
 	}
@@ -295,17 +314,26 @@ func (ad *AllDebrid) DeleteTorrent(torrentId string) error {
 	return nil
 }
 
-func (ad *AllDebrid) GetFileDownloadLinks(t *types.Torrent) error {
+func (ad *AllDebrid) GetFileDownloadLinks(ctx context.Context, t *types.Torrent) error {
 	filesCh := make(chan types.File, len(t.Files))
 	linksCh := make(chan types.DownloadLink, len(t.Files))
 	errCh := make(chan error, len(t.Files))
 
 	var wg sync.WaitGroup
-	wg.Add(len(t.Files))
 	for _, file := range t.Files {
+		wg.Add(1)
 		go func(file types.File) {
 			defer wg.Done()
-			link, err := ad.GetDownloadLink(t, &file)
+
+			// Check context before processing
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			default:
+			}
+
+			link, err := ad.GetDownloadLink(ctx, t, &file)
 			if err != nil {
 				errCh <- err
 				return
@@ -338,7 +366,7 @@ func (ad *AllDebrid) GetFileDownloadLinks(t *types.Torrent) error {
 	// Check for errors
 	for err := range errCh {
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to get download links: %w", err)
 		}
 	}
 
@@ -346,12 +374,15 @@ func (ad *AllDebrid) GetFileDownloadLinks(t *types.Torrent) error {
 	return nil
 }
 
-func (ad *AllDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (types.DownloadLink, error) {
+func (ad *AllDebrid) GetDownloadLink(ctx context.Context, t *types.Torrent, file *types.File) (types.DownloadLink, error) {
 	url := fmt.Sprintf("%s/link/unlock", ad.Host)
 	query := gourl.Values{}
 	query.Add("link", file.Link)
 	url += "?" + query.Encode()
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return types.DownloadLink{}, fmt.Errorf("failed to create request: %w", err)
+	}
 	resp, err := ad.client.MakeRequest(req)
 	if err != nil {
 		return types.DownloadLink{}, err
@@ -386,7 +417,10 @@ func (ad *AllDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (types.
 
 func (ad *AllDebrid) GetTorrents(ctx context.Context) ([]*types.Torrent, error) {
 	url := fmt.Sprintf("%s/magnet/status?status=ready", ad.Host)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
 	resp, err := ad.client.MakeRequest(req)
 	torrents := make([]*types.Torrent, 0)
 	if err != nil {
@@ -417,7 +451,7 @@ func (ad *AllDebrid) GetTorrents(ctx context.Context) ([]*types.Torrent, error) 
 	return torrents, nil
 }
 
-func (ad *AllDebrid) RefreshDownloadLinks() error {
+func (ad *AllDebrid) RefreshDownloadLinks(ctx context.Context) error {
 	return nil
 }
 
@@ -429,7 +463,7 @@ func (ad *AllDebrid) GetDownloadUncached() bool {
 	return ad.DownloadUncached
 }
 
-func (ad *AllDebrid) CheckLink(link string) error {
+func (ad *AllDebrid) CheckLink(ctx context.Context, link string) error {
 	return nil
 }
 
@@ -443,14 +477,14 @@ func (ad *AllDebrid) GetAvailableSlots(ctx context.Context) (int, error) {
 	return 0, fmt.Errorf("GetAvailableSlots not implemented for AllDebrid")
 }
 
-func (ad *AllDebrid) GetProfile() (*types.Profile, error) {
+func (ad *AllDebrid) GetProfile(ctx context.Context) (*types.Profile, error) {
 	if ad.Profile != nil {
 		return ad.Profile, nil
 	}
 	url := fmt.Sprintf("%s/user", ad.Host)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	resp, err := ad.client.MakeRequest(req)
 	if err != nil {
@@ -495,6 +529,6 @@ func (ad *AllDebrid) AccountManager() *account.Manager {
 	return ad.accountsManager
 }
 
-func (ad *AllDebrid) SyncAccounts() error {
+func (ad *AllDebrid) SyncAccounts(ctx context.Context) error {
 	return nil
 }

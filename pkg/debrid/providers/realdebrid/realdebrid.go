@@ -96,7 +96,7 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid
 		limit:           dc.Limit,
 	}
 
-	if _, err := r.GetProfile(); err != nil {
+	if _, err := r.GetProfile(context.Background()); err != nil {
 		return nil, err
 	} else {
 		return r, nil
@@ -187,7 +187,7 @@ func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, select
 
 	r.logger.Info().Msgf("RAR file detected, unpacking: %s", t.Name)
 	linkFile := &types.File{TorrentId: t.Id, Link: data.Links[0]}
-	downloadLinkObj, err := r.GetDownloadLink(t, linkFile)
+	downloadLinkObj, err := r.GetDownloadLink(context.Background(), t, linkFile)
 
 	if err != nil {
 		r.logger.Debug().Err(err).Msgf("Error getting download link for RAR file: %s. Falling back to single file representation.", t.Name)
@@ -274,7 +274,7 @@ func (r *RealDebrid) getTorrentFiles(t *types.Torrent, data torrentInfo) map[str
 	return files
 }
 
-func (r *RealDebrid) IsAvailable(hashes []string) map[string]bool {
+func (r *RealDebrid) IsAvailable(ctx context.Context, hashes []string) map[string]bool {
 	// Check if the infohashes are available in the local cache
 	result := make(map[string]bool)
 
@@ -300,7 +300,11 @@ func (r *RealDebrid) IsAvailable(hashes []string) map[string]bool {
 
 		hashStr := strings.Join(validHashes, "/")
 		url := fmt.Sprintf("%s/torrents/instantAvailability/%s", r.Host, hashStr)
-		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			r.logger.Error().Err(err).Msg("Failed to create availability request")
+			return result
+		}
 		resp, err := r.client.MakeRequest(req)
 		if err != nil {
 			r.logger.Error().Err(err).Msgf("Error checking availability")
@@ -322,20 +326,20 @@ func (r *RealDebrid) IsAvailable(hashes []string) map[string]bool {
 	return result
 }
 
-func (r *RealDebrid) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
+func (r *RealDebrid) SubmitMagnet(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
 	if t.Magnet.IsTorrent() {
-		return r.addTorrent(t)
+		return r.addTorrent(ctx, t)
 	}
-	return r.addMagnet(t)
+	return r.addMagnet(ctx, t)
 }
 
-func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
+func (r *RealDebrid) addTorrent(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
 	url := fmt.Sprintf("%s/torrents/addTorrent", r.Host)
 	var data AddMagnetSchema
-	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(t.Magnet.File))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(t.Magnet.File))
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create add torrent request: %w", err)
 	}
 	req.Header.Add("Content-Type", "application/x-bittorrent")
 	resp, err := r.client.Do(req)
@@ -362,13 +366,16 @@ func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
 	return t, nil
 }
 
-func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
+func (r *RealDebrid) addMagnet(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
 	url := fmt.Sprintf("%s/torrents/addMagnet", r.Host)
 	payload := gourl.Values{
 		"magnet": {t.Magnet.Link},
 	}
 	var data AddMagnetSchema
-	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(payload.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(payload.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create add magnet request: %w", err)
+	}
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -394,9 +401,12 @@ func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 	return t, nil
 }
 
-func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
+func (r *RealDebrid) GetTorrent(ctx context.Context, torrentId string) (*types.Torrent, error) {
 	url := fmt.Sprintf("%s/torrents/info/%s", r.Host, torrentId)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create get torrent request: %w", err)
+	}
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -433,9 +443,12 @@ func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 	return t, nil
 }
 
-func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
+func (r *RealDebrid) UpdateTorrent(ctx context.Context, t *types.Torrent) error {
 	url := fmt.Sprintf("%s/torrents/info/%s", r.Host, t.Id)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create update torrent request: %w", err)
+	}
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return err
@@ -469,80 +482,97 @@ func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 	return nil
 }
 
-func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
+func (r *RealDebrid) CheckStatus(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
 	url := fmt.Sprintf("%s/torrents/info/%s", r.Host, t.Id)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return t, fmt.Errorf("failed to create check status request: %w", err)
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
 	for {
-		resp, err := r.client.MakeRequest(req)
-		if err != nil {
-			r.logger.Info().Msgf("ERROR Checking file: %v", err)
-			return t, err
-		}
-		var data torrentInfo
-		if err = json.Unmarshal(resp, &data); err != nil {
-			return t, err
-		}
-		status := data.Status
-		t.Name = data.Filename // Important because some magnet changes the name
-		t.Folder = data.OriginalFilename
-		t.Filename = data.Filename
-		t.OriginalFilename = data.OriginalFilename
-		t.Bytes = data.Bytes
-		t.Progress = data.Progress
-		t.Speed = data.Speed
-		t.Seeders = data.Seeders
-		t.Links = data.Links
-		t.Status = status
-		t.Debrid = r.name
-		t.MountPath = r.MountPath
-		t.Added = data.Added
-		if status == "waiting_files_selection" {
-			t.Files = r.getTorrentFiles(t, data)
-			if len(t.Files) == 0 {
-				return t, fmt.Errorf("no valid files found")
-			}
-			filesId := make([]string, 0)
-			for _, f := range t.Files {
-				filesId = append(filesId, f.Id)
-			}
-			p := gourl.Values{
-				"files": {strings.Join(filesId, ",")},
-			}
-			payload := strings.NewReader(p.Encode())
-			req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/torrents/selectFiles/%s", r.Host, t.Id), payload)
-			res, err := r.client.Do(req)
+		select {
+		case <-ctx.Done():
+			return t, fmt.Errorf("context cancelled during status check: %w", ctx.Err())
+		case <-ticker.C:
+			resp, err := r.client.MakeRequest(req)
 			if err != nil {
+				r.logger.Info().Msgf("ERROR Checking file: %v", err)
 				return t, err
 			}
-			if res.StatusCode != http.StatusNoContent {
-				if res.StatusCode == 509 {
-					return nil, utils.TooManyActiveDownloadsError
+			var data torrentInfo
+			if err = json.Unmarshal(resp, &data); err != nil {
+				return t, fmt.Errorf("failed to unmarshal torrent info: %w", err)
+			}
+			status := data.Status
+			t.Name = data.Filename // Important because some magnet changes the name
+			t.Folder = data.OriginalFilename
+			t.Filename = data.Filename
+			t.OriginalFilename = data.OriginalFilename
+			t.Bytes = data.Bytes
+			t.Progress = data.Progress
+			t.Speed = data.Speed
+			t.Seeders = data.Seeders
+			t.Links = data.Links
+			t.Status = status
+			t.Debrid = r.name
+			t.MountPath = r.MountPath
+			t.Added = data.Added
+			if status == "waiting_files_selection" {
+				t.Files = r.getTorrentFiles(t, data)
+				if len(t.Files) == 0 {
+					return t, fmt.Errorf("no valid files found")
 				}
-				return t, fmt.Errorf("realdebrid API error: Status: %d", res.StatusCode)
-			}
-		} else if status == "downloaded" {
-			t.Files, err = r.getSelectedFiles(t, data) // Get selected files
-			if err != nil {
-				return t, err
-			}
+				filesId := make([]string, 0)
+				for _, f := range t.Files {
+					filesId = append(filesId, f.Id)
+				}
+				p := gourl.Values{
+					"files": {strings.Join(filesId, ",")},
+				}
+				payload := strings.NewReader(p.Encode())
+				selectReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/torrents/selectFiles/%s", r.Host, t.Id), payload)
+				if err != nil {
+					return t, fmt.Errorf("failed to create select files request: %w", err)
+				}
+				res, err := r.client.Do(selectReq)
+				if err != nil {
+					return t, err
+				}
+				if res.StatusCode != http.StatusNoContent {
+					if res.StatusCode == 509 {
+						return nil, utils.TooManyActiveDownloadsError
+					}
+					return t, fmt.Errorf("realdebrid API error: Status: %d", res.StatusCode)
+				}
+			} else if status == "downloaded" {
+				t.Files, err = r.getSelectedFiles(t, data) // Get selected files
+				if err != nil {
+					return t, err
+				}
 
-			r.logger.Info().Msgf("Torrent: %s downloaded to RD", t.Name)
-			return t, nil
-		} else if utils.Contains(r.GetDownloadingStatus(), status) {
-			if !t.DownloadUncached {
-				return t, fmt.Errorf("torrent: %s not cached", t.Name)
+				r.logger.Info().Msgf("Torrent: %s downloaded to RD", t.Name)
+				return t, nil
+			} else if utils.Contains(r.GetDownloadingStatus(), status) {
+				if !t.DownloadUncached {
+					return t, fmt.Errorf("torrent: %s not cached", t.Name)
+				}
+				return t, nil
+			} else {
+				return t, fmt.Errorf("torrent: %s has error: %s", t.Name, status)
 			}
-			return t, nil
-		} else {
-			return t, fmt.Errorf("torrent: %s has error: %s", t.Name, status)
 		}
-
 	}
 }
 
-func (r *RealDebrid) DeleteTorrent(torrentId string) error {
+func (r *RealDebrid) DeleteTorrent(ctx context.Context, torrentId string) error {
 	url := fmt.Sprintf("%s/torrents/delete/%s", r.Host, torrentId)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create delete torrent request: %w", err)
+	}
 	if _, err := r.client.MakeRequest(req); err != nil {
 		return err
 	}
@@ -550,7 +580,7 @@ func (r *RealDebrid) DeleteTorrent(torrentId string) error {
 	return nil
 }
 
-func (r *RealDebrid) GetFileDownloadLinks(t *types.Torrent) error {
+func (r *RealDebrid) GetFileDownloadLinks(ctx context.Context, t *types.Torrent) error {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
@@ -565,7 +595,7 @@ func (r *RealDebrid) GetFileDownloadLinks(t *types.Torrent) error {
 		go func(file types.File) {
 			defer wg.Done()
 
-			link, err := r.GetDownloadLink(t, &file)
+			link, err := r.GetDownloadLink(ctx, t, &file)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -602,12 +632,15 @@ func (r *RealDebrid) GetFileDownloadLinks(t *types.Torrent) error {
 	return nil
 }
 
-func (r *RealDebrid) CheckLink(link string) error {
+func (r *RealDebrid) CheckLink(ctx context.Context, link string) error {
 	url := fmt.Sprintf("%s/unrestrict/check", r.Host)
 	payload := gourl.Values{
 		"link": {link},
 	}
-	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(payload.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(payload.Encode()))
+	if err != nil {
+		return fmt.Errorf("failed to create check link request: %w", err)
+	}
 	resp, err := r.repairClient.Do(req)
 	if err != nil {
 		return err
@@ -618,7 +651,7 @@ func (r *RealDebrid) CheckLink(link string) error {
 	return nil
 }
 
-func (r *RealDebrid) getDownloadLink(account *account.Account, file *types.File) (types.DownloadLink, error) {
+func (r *RealDebrid) getDownloadLink(ctx context.Context, account *account.Account, file *types.File) (types.DownloadLink, error) {
 	url := fmt.Sprintf("%s/unrestrict/link/", r.Host)
 	emptyLink := types.DownloadLink{}
 	_link := file.Link
@@ -628,7 +661,10 @@ func (r *RealDebrid) getDownloadLink(account *account.Account, file *types.File)
 	payload := gourl.Values{
 		"link": {_link},
 	}
-	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(payload.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(payload.Encode()))
+	if err != nil {
+		return emptyLink, fmt.Errorf("failed to create unrestrict link request: %w", err)
+	}
 	resp, err := account.Client().Do(req)
 
 	if err != nil {
@@ -675,10 +711,10 @@ func (r *RealDebrid) getDownloadLink(account *account.Account, file *types.File)
 	return dl, nil
 }
 
-func (r *RealDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (types.DownloadLink, error) {
+func (r *RealDebrid) GetDownloadLink(ctx context.Context, t *types.Torrent, file *types.File) (types.DownloadLink, error) {
 	accounts := r.accountsManager.Active()
 	for _, _account := range accounts {
-		downloadLink, err := r.getDownloadLink(_account, file)
+		downloadLink, err := r.getDownloadLink(ctx, _account, file)
 		if err == nil {
 			return downloadLink, nil
 		}
@@ -693,7 +729,7 @@ func (r *RealDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (types.
 		}
 		backOff := 1 * time.Second
 		for retries > 0 {
-			downloadLink, err = r.getDownloadLink(_account, file)
+			downloadLink, err = r.getDownloadLink(ctx, _account, file)
 			if err == nil {
 				return downloadLink, nil
 			}
@@ -709,13 +745,16 @@ func (r *RealDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (types.
 	return types.DownloadLink{}, fmt.Errorf("realdebrid API error: used all active accounts")
 }
 
-func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, error) {
+func (r *RealDebrid) getTorrents(ctx context.Context, offset int, limit int) (int, []*types.Torrent, error) {
 	url := fmt.Sprintf("%s/torrents?limit=%d", r.Host, limit)
 	torrents := make([]*types.Torrent, 0)
 	if offset > 0 {
 		url = fmt.Sprintf("%s&offset=%d", url, offset)
 	}
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, torrents, fmt.Errorf("failed to create get torrents request: %w", err)
+	}
 	resp, err := r.client.Do(req)
 
 	if err != nil {
@@ -775,7 +814,7 @@ func (r *RealDebrid) GetTorrents(ctx context.Context) ([]*types.Torrent, error) 
 	offset := 0
 	for {
 		// Fetch next batch of torrents
-		_, torrents, err := r.getTorrents(offset, limit)
+		_, torrents, err := r.getTorrents(ctx, offset, limit)
 		if err != nil {
 			fetchError = err
 			break
@@ -799,7 +838,7 @@ func (r *RealDebrid) GetTorrents(ctx context.Context) ([]*types.Torrent, error) 
 	return allTorrents, nil
 }
 
-func (r *RealDebrid) RefreshDownloadLinks() error {
+func (r *RealDebrid) RefreshDownloadLinks(ctx context.Context) error {
 	accounts := r.accountsManager.All()
 
 	for _, _account := range accounts {
@@ -810,7 +849,7 @@ func (r *RealDebrid) RefreshDownloadLinks() error {
 		limit := 1000
 		links := make(map[string]*types.DownloadLink)
 		for {
-			dl, err := r.getDownloadLinks(_account, offset, limit)
+			dl, err := r.getDownloadLinks(ctx, _account, offset, limit)
 			if err != nil {
 				break
 			}
@@ -833,12 +872,15 @@ func (r *RealDebrid) RefreshDownloadLinks() error {
 	return nil
 }
 
-func (r *RealDebrid) getDownloadLinks(account *account.Account, offset int, limit int) ([]types.DownloadLink, error) {
+func (r *RealDebrid) getDownloadLinks(ctx context.Context, account *account.Account, offset int, limit int) ([]types.DownloadLink, error) {
 	url := fmt.Sprintf("%s/downloads?limit=%d", r.Host, limit)
 	if offset > 0 {
 		url = fmt.Sprintf("%s&offset=%d", url, offset)
 	}
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create get download links request: %w", err)
+	}
 	resp, err := account.Client().MakeRequest(req)
 	if err != nil {
 		return nil, err
@@ -876,12 +918,15 @@ func (r *RealDebrid) GetMountPath() string {
 	return r.MountPath
 }
 
-func (r *RealDebrid) GetProfile() (*types.Profile, error) {
+func (r *RealDebrid) GetProfile(ctx context.Context) (*types.Profile, error) {
 	if r.Profile != nil {
 		return r.Profile, nil
 	}
 	url := fmt.Sprintf("%s/user", r.Host)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create get profile request: %w", err)
+	}
 
 	resp, err := r.client.MakeRequest(req)
 	if err != nil {
@@ -925,13 +970,13 @@ func (r *RealDebrid) AccountManager() *account.Manager {
 	return r.accountsManager
 }
 
-func (r *RealDebrid) SyncAccounts() error {
+func (r *RealDebrid) SyncAccounts(ctx context.Context) error {
 	// Sync accounts with the current configuration
 	if len(r.accountsManager.Active()) == 0 {
 		return nil
 	}
 	for _, _account := range r.accountsManager.All() {
-		if err := r.syncAccount(_account); err != nil {
+		if err := r.syncAccount(ctx, _account); err != nil {
 			r.logger.Error().Err(err).Msgf("Error syncing account %s", _account.Username)
 			continue // Skip this account and continue with the next
 		}
@@ -939,11 +984,11 @@ func (r *RealDebrid) SyncAccounts() error {
 	return nil
 }
 
-func (r *RealDebrid) syncAccount(account *account.Account) error {
+func (r *RealDebrid) syncAccount(ctx context.Context, account *account.Account) error {
 	if account.Token == "" {
 		return fmt.Errorf("account %s has no token", account.Username)
 	}
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/user", r.Host), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/user", r.Host), nil)
 	if err != nil {
 		return fmt.Errorf("error creating request for account %s: %w", account.Username, err)
 	}
@@ -963,7 +1008,7 @@ func (r *RealDebrid) syncAccount(account *account.Account) error {
 	account.Username = profile.Username
 
 	// Get traffic usage
-	trafficReq, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/traffic/details", r.Host), nil)
+	trafficReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/traffic/details", r.Host), nil)
 	if err != nil {
 		return fmt.Errorf("error creating request for traffic details for account %s: %w", account.Username, err)
 	}

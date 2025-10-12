@@ -336,7 +336,7 @@ func (tb *Torbox) Logger() zerolog.Logger {
 	return tb.logger
 }
 
-func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
+func (tb *Torbox) IsAvailable(ctx context.Context, hashes []string) map[string]bool {
 	// Check if the infohashes are available in the local cache
 	result := make(map[string]bool)
 
@@ -362,16 +362,20 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 
 		hashStr := strings.Join(validHashes, ",")
 		url := fmt.Sprintf("%s/api/torrents/checkcached?hash=%s", tb.Host, hashStr)
-		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			tb.logger.Error().Err(err).Msg("Failed to create request for availability check")
+			return result
+		}
 		resp, err := tb.client.MakeRequest(req)
 		if err != nil {
-			tb.logger.Error().Err(err).Msgf("Error checking availability")
+			tb.logger.Error().Err(err).Msg("Error checking availability")
 			return result
 		}
 		var res AvailableResponse
 		err = json.Unmarshal(resp, &res)
 		if err != nil {
-			tb.logger.Error().Err(err).Msgf("Error marshalling availability")
+			tb.logger.Error().Err(err).Msg("Error marshalling availability")
 			return result
 		}
 		if res.Data == nil {
@@ -387,7 +391,7 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 	return result
 }
 
-func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
+func (tb *Torbox) SubmitMagnet(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
 	url := fmt.Sprintf("%s/api/torrents/createtorrent", tb.Host)
 	payload := &bytes.Buffer{}
 	writer := multipart.NewWriter(payload)
@@ -397,18 +401,21 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	}
 	err := writer.Close()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to close multipart writer: %w", err)
 	}
-	req, _ := http.NewRequest(http.MethodPost, url, payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := tb.client.MakeRequest(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to submit magnet: %w", err)
 	}
 	var data AddMagnetResponse
 	err = json.Unmarshal(resp, &data)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 	if data.Data == nil {
 		return nil, fmt.Errorf("error adding torrent")
@@ -446,7 +453,7 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) string {
 	return determinedStatus
 }
 
-func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
+func (tb *Torbox) GetTorrent(ctx context.Context, torrentId string) (*types.Torrent, error) {
 	// P1 Fix: Use O(1) map lookup instead of linear search
 	if cachedInfo := tb.getTorboxInfoFromCache(torrentId); cachedInfo != nil {
 		tb.logger.Debug().
@@ -461,15 +468,18 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Msg("Fetching torrent from API (cache miss)")
 
 	url := fmt.Sprintf("%s/api/torrents/mylist/?id=%s", tb.Host, torrentId)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
 	resp, err := tb.client.MakeRequest(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get torrent: %w", err)
 	}
 	var res TorrentsListResponse
 	err = json.Unmarshal(resp, &res)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 	if res.Data == nil || len(*res.Data) == 0 {
 		return nil, fmt.Errorf("error getting torrent: no data returned")
@@ -565,7 +575,7 @@ func (tb *Torbox) convertSingleTorboxInfoToTorrent(data *torboxInfo) *types.Torr
 	return t
 }
 
-func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
+func (tb *Torbox) UpdateTorrent(ctx context.Context, t *types.Torrent) error {
 	// Try to get from cache first (P1: uses O(1) map lookup)
 	var data *torboxInfo
 	if cachedInfo := tb.getTorboxInfoFromCache(t.Id); cachedInfo != nil {
@@ -580,15 +590,18 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 			Msg("Updating torrent from API (cache miss)")
 
 		url := fmt.Sprintf("%s/api/torrents/mylist/?id=%s", tb.Host, t.Id)
-		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
 		resp, err := tb.client.MakeRequest(req)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to update torrent: %w", err)
 		}
 		var res TorrentsListResponse
 		err = json.Unmarshal(resp, &res)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to unmarshal response: %w", err)
 		}
 		if res.Data == nil || len(*res.Data) == 0 {
 			return fmt.Errorf("error getting torrent: no data returned")
@@ -662,38 +675,51 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 	return nil
 }
 
-func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
+func (tb *Torbox) CheckStatus(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
 	for {
-		err := tb.UpdateTorrent(torrent)
+		select {
+		case <-ctx.Done():
+			return torrent, fmt.Errorf("context cancelled during status check: %w", ctx.Err())
+		case <-ticker.C:
+			err := tb.UpdateTorrent(ctx, torrent)
 
-		if err != nil || torrent == nil {
-			return torrent, err
-		}
-		status := torrent.Status
-		if status == "downloaded" {
-			tb.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
-			return torrent, nil
-		} else if utils.Contains(tb.GetDownloadingStatus(), status) {
-			if !torrent.DownloadUncached {
-				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
+			if err != nil || torrent == nil {
+				return torrent, err
 			}
-			// Break out of the loop if the torrent is downloading.
-			// This is necessary to prevent infinite loop since we moved to sync downloading and async processing
-			return torrent, nil
-		} else {
-			return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
+			status := torrent.Status
+			if status == "downloaded" {
+				tb.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
+				return torrent, nil
+			} else if utils.Contains(tb.GetDownloadingStatus(), status) {
+				if !torrent.DownloadUncached {
+					return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
+				}
+				// Break out of the loop if the torrent is downloading.
+				// This is necessary to prevent infinite loop since we moved to sync downloading and async processing
+				return torrent, nil
+			} else {
+				return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
+			}
 		}
-
 	}
 }
 
-func (tb *Torbox) DeleteTorrent(torrentId string) error {
+func (tb *Torbox) DeleteTorrent(ctx context.Context, torrentId string) error {
 	url := fmt.Sprintf("%s/api/torrents/controltorrent/%s", tb.Host, torrentId)
 	payload := map[string]string{"torrent_id": torrentId, "action": "Delete"}
-	jsonPayload, _ := json.Marshal(payload)
-	req, _ := http.NewRequest(http.MethodDelete, url, bytes.NewBuffer(jsonPayload))
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
 	if _, err := tb.client.MakeRequest(req); err != nil {
-		return err
+		return fmt.Errorf("failed to delete torrent: %w", err)
 	}
 	tb.logger.Info().Msgf("Torrent %s deleted from Torbox", torrentId)
 
@@ -712,15 +738,13 @@ func (tb *Torbox) invalidateCache() {
 	tb.torrentsCache.data = nil
 	tb.torrentsCache.expiresAt = time.Time{}
 	tb.torrentsCache.convertedData = nil
-	// Explicitly clear map to help GC
-	for k := range tb.torrentsCache.dataMap {
-		delete(tb.torrentsCache.dataMap, k)
-	}
+	// Clear map using Go 1.21+ built-in
+	clear(tb.torrentsCache.dataMap)
 
 	tb.logger.Debug().Msg("Torrents cache invalidated")
 }
 
-func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
+func (tb *Torbox) GetFileDownloadLinks(ctx context.Context, t *types.Torrent) error {
 	filesCh := make(chan types.File, len(t.Files))
 	linkCh := make(chan types.DownloadLink)
 	errCh := make(chan error, len(t.Files))
@@ -730,7 +754,7 @@ func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
 	for _, file := range t.Files {
 		go func() {
 			defer wg.Done()
-			link, err := tb.GetDownloadLink(t, &file)
+			link, err := tb.GetDownloadLink(ctx, t, &file)
 			if err != nil {
 				errCh <- err
 				return
@@ -766,7 +790,7 @@ func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
 	return nil
 }
 
-func (tb *Torbox) GetDownloadLink(t *types.Torrent, file *types.File) (types.DownloadLink, error) {
+func (tb *Torbox) GetDownloadLink(ctx context.Context, t *types.Torrent, file *types.File) (types.DownloadLink, error) {
 	url := fmt.Sprintf("%s/api/torrents/requestdl/", tb.Host)
 	query := gourl.Values{}
 	query.Add("torrent_id", t.Id)
@@ -774,7 +798,10 @@ func (tb *Torbox) GetDownloadLink(t *types.Torrent, file *types.File) (types.Dow
 	query.Add("file_id", file.Id)
 	url += "?" + query.Encode()
 
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return types.DownloadLink{}, fmt.Errorf("failed to create request: %w", err)
+	}
 	resp, err := tb.client.MakeRequest(req)
 	if err != nil {
 		// Check if the error contains DATABASE_ERROR (HTTP 500 with DATABASE_ERROR in body)
@@ -979,19 +1006,21 @@ func (tb *Torbox) GetTorrents(ctx context.Context) ([]*types.Torrent, error) {
 	}
 
 	// P1 Fix: Build dataMap for O(1) lookup
-	dataMap := make(map[string]*torboxInfo, len(allTorboxInfo))
+	// Create a new map to ensure atomic replacement and prevent race conditions
+	newDataMap := make(map[string]*torboxInfo, len(allTorboxInfo))
 	for _, info := range allTorboxInfo {
-		dataMap[strconv.Itoa(info.Id)] = info
+		newDataMap[strconv.Itoa(info.Id)] = info
 	}
 
 	// P2 Fix: Convert data before caching
 	converted := tb.convertTorboxInfoToTorrents(allTorboxInfo)
 
 	// Update all caches with new data (single lock)
+	// Atomic replacement - readers either see old or new map, never partial state
 	tb.torrentsCache.mu.Lock()
 	tb.torrentsCache.data = allTorboxInfo
 	tb.torrentsCache.expiresAt = time.Now().Add(torrentsListCacheDuration)
-	tb.torrentsCache.dataMap = dataMap
+	tb.torrentsCache.dataMap = newDataMap
 	tb.torrentsCache.convertedData = converted
 	cacheExpiresAt := tb.torrentsCache.expiresAt
 	tb.torrentsCache.mu.Unlock()
@@ -1161,11 +1190,11 @@ func (tb *Torbox) GetDownloadUncached() bool {
 	return tb.DownloadUncached
 }
 
-func (tb *Torbox) RefreshDownloadLinks() error {
+func (tb *Torbox) RefreshDownloadLinks(ctx context.Context) error {
 	return nil
 }
 
-func (tb *Torbox) CheckLink(link string) error {
+func (tb *Torbox) CheckLink(ctx context.Context, link string) error {
 	return nil
 }
 
@@ -1216,7 +1245,7 @@ func (tb *Torbox) GetAvailableSlots(ctx context.Context) (int, error) {
 	return availableSlots, nil
 }
 
-func (tb *Torbox) GetProfile() (*types.Profile, error) {
+func (tb *Torbox) GetProfile(ctx context.Context) (*types.Profile, error) {
 	return nil, nil
 }
 
@@ -1224,6 +1253,6 @@ func (tb *Torbox) AccountManager() *account.Manager {
 	return tb.accountsManager
 }
 
-func (tb *Torbox) SyncAccounts() error {
+func (tb *Torbox) SyncAccounts(ctx context.Context) error {
 	return nil
 }

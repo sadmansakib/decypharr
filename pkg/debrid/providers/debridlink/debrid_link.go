@@ -78,7 +78,7 @@ func (dl *DebridLink) Logger() zerolog.Logger {
 	return dl.logger
 }
 
-func (dl *DebridLink) IsAvailable(hashes []string) map[string]bool {
+func (dl *DebridLink) IsAvailable(ctx context.Context, hashes []string) map[string]bool {
 	// Check if the infohashes are available in the local cache
 	result := make(map[string]bool)
 
@@ -104,7 +104,11 @@ func (dl *DebridLink) IsAvailable(hashes []string) map[string]bool {
 
 		hashStr := strings.Join(validHashes, ",")
 		url := fmt.Sprintf("%s/seedbox/cached/%s", dl.Host, hashStr)
-		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			dl.logger.Error().Err(err).Msg("Failed to create request for checking availability")
+			return result
+		}
 		resp, err := dl.client.MakeRequest(req)
 		if err != nil {
 			dl.logger.Error().Err(err).Msgf("Error checking availability")
@@ -130,9 +134,12 @@ func (dl *DebridLink) IsAvailable(hashes []string) map[string]bool {
 	return result
 }
 
-func (dl *DebridLink) GetTorrent(torrentId string) (*types.Torrent, error) {
+func (dl *DebridLink) GetTorrent(ctx context.Context, torrentId string) (*types.Torrent, error) {
 	url := fmt.Sprintf("%s/seedbox/%s", dl.Host, torrentId)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request for getting torrent: %w", err)
+	}
 	resp, err := dl.client.MakeRequest(req)
 	if err != nil {
 		return nil, err
@@ -182,9 +189,12 @@ func (dl *DebridLink) GetTorrent(torrentId string) (*types.Torrent, error) {
 	return torrent, nil
 }
 
-func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
+func (dl *DebridLink) UpdateTorrent(ctx context.Context, t *types.Torrent) error {
 	url := fmt.Sprintf("%s/seedbox/list?ids=%s", dl.Host, t.Id)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request for updating torrent: %w", err)
+	}
 	resp, err := dl.client.MakeRequest(req)
 	if err != nil {
 		return err
@@ -252,11 +262,14 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 	return nil
 }
 
-func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
+func (dl *DebridLink) SubmitMagnet(ctx context.Context, t *types.Torrent) (*types.Torrent, error) {
 	url := fmt.Sprintf("%s/seedbox/add", dl.Host)
 	payload := map[string]string{"url": t.Magnet.Link}
 	jsonPayload, _ := json.Marshal(payload)
-	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(jsonPayload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request for submitting magnet: %w", err)
+	}
 	resp, err := dl.client.MakeRequest(req)
 	if err != nil {
 		return nil, err
@@ -312,33 +325,43 @@ func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
 	return t, nil
 }
 
-func (dl *DebridLink) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
-	for {
-		err := dl.UpdateTorrent(torrent)
-		if err != nil || torrent == nil {
-			return torrent, err
-		}
-		status := torrent.Status
-		if status == "downloaded" {
-			dl.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
-			return torrent, nil
-		} else if utils.Contains(dl.GetDownloadingStatus(), status) {
-			if !torrent.DownloadUncached {
-				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
-			}
-			// Break out of the loop if the torrent is downloading.
-			// This is necessary to prevent infinite loop since we moved to sync downloading and async processing
-			return torrent, nil
-		} else {
-			return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
-		}
+func (dl *DebridLink) CheckStatus(ctx context.Context, torrent *types.Torrent) (*types.Torrent, error) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 
+	for {
+		select {
+		case <-ctx.Done():
+			return torrent, fmt.Errorf("context cancelled during status check: %w", ctx.Err())
+		case <-ticker.C:
+			err := dl.UpdateTorrent(ctx, torrent)
+			if err != nil || torrent == nil {
+				return torrent, err
+			}
+			status := torrent.Status
+			if status == "downloaded" {
+				dl.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
+				return torrent, nil
+			} else if utils.Contains(dl.GetDownloadingStatus(), status) {
+				if !torrent.DownloadUncached {
+					return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
+				}
+				// Break out of the loop if the torrent is downloading.
+				// This is necessary to prevent infinite loop since we moved to sync downloading and async processing
+				return torrent, nil
+			} else {
+				return torrent, fmt.Errorf("torrent: %s has error", torrent.Name)
+			}
+		}
 	}
 }
 
-func (dl *DebridLink) DeleteTorrent(torrentId string) error {
+func (dl *DebridLink) DeleteTorrent(ctx context.Context, torrentId string) error {
 	url := fmt.Sprintf("%s/seedbox/%s/remove", dl.Host, torrentId)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request for deleting torrent: %w", err)
+	}
 	if _, err := dl.client.MakeRequest(req); err != nil {
 		return err
 	}
@@ -346,16 +369,16 @@ func (dl *DebridLink) DeleteTorrent(torrentId string) error {
 	return nil
 }
 
-func (dl *DebridLink) GetFileDownloadLinks(t *types.Torrent) error {
+func (dl *DebridLink) GetFileDownloadLinks(ctx context.Context, t *types.Torrent) error {
 	// Download links are already generated
 	return nil
 }
 
-func (dl *DebridLink) RefreshDownloadLinks() error {
+func (dl *DebridLink) RefreshDownloadLinks(ctx context.Context) error {
 	return nil
 }
 
-func (dl *DebridLink) GetDownloadLink(t *types.Torrent, file *types.File) (types.DownloadLink, error) {
+func (dl *DebridLink) GetDownloadLink(ctx context.Context, t *types.Torrent, file *types.File) (types.DownloadLink, error) {
 	return dl.accountsManager.GetDownloadLink(file.Link)
 }
 
@@ -372,7 +395,7 @@ func (dl *DebridLink) GetTorrents(ctx context.Context) ([]*types.Torrent, error)
 	perPage := 100
 	torrents := make([]*types.Torrent, 0)
 	for {
-		t, err := dl.getTorrents(page, perPage)
+		t, err := dl.getTorrents(ctx, page, perPage)
 		if err != nil {
 			break
 		}
@@ -385,9 +408,12 @@ func (dl *DebridLink) GetTorrents(ctx context.Context) ([]*types.Torrent, error)
 	return torrents, nil
 }
 
-func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, error) {
+func (dl *DebridLink) getTorrents(ctx context.Context, page, perPage int) ([]*types.Torrent, error) {
 	url := fmt.Sprintf("%s/seedbox/list?page=%d&perPage=%d", dl.Host, page, perPage)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request for getting torrents: %w", err)
+	}
 	resp, err := dl.client.MakeRequest(req)
 	torrents := make([]*types.Torrent, 0)
 	if err != nil {
@@ -454,7 +480,7 @@ func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, error) {
 	return torrents, nil
 }
 
-func (dl *DebridLink) CheckLink(link string) error {
+func (dl *DebridLink) CheckLink(ctx context.Context, link string) error {
 	return nil
 }
 
@@ -467,14 +493,14 @@ func (dl *DebridLink) GetAvailableSlots(ctx context.Context) (int, error) {
 	return 0, fmt.Errorf("GetAvailableSlots not implemented for DebridLink")
 }
 
-func (dl *DebridLink) GetProfile() (*types.Profile, error) {
+func (dl *DebridLink) GetProfile(ctx context.Context) (*types.Profile, error) {
 	if dl.Profile != nil {
 		return dl.Profile, nil
 	}
 	url := fmt.Sprintf("%s/account/infos", dl.Host)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create request for getting profile: %w", err)
 	}
 	resp, err := dl.client.MakeRequest(req)
 	if err != nil {
@@ -516,6 +542,6 @@ func (dl *DebridLink) AccountManager() *account.Manager {
 	return dl.accountsManager
 }
 
-func (dl *DebridLink) SyncAccounts() error {
+func (dl *DebridLink) SyncAccounts(ctx context.Context) error {
 	return nil
 }
