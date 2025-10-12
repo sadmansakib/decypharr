@@ -101,7 +101,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		for debridName, client := range clients {
 			debridStat := debridTypes.Stats{}
 			libraryStat := debridTypes.LibraryStats{}
-			profile, err := client.GetProfile()
+			profile, err := client.GetProfile(r.Context())
 			if err != nil {
 				s.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to get debrid profile")
 				profile = &debridTypes.Profile{

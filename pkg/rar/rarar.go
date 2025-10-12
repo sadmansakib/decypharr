@@ -543,7 +543,7 @@ func (r *Reader) readFiles() error {
 	}
 
 	if !foundEndMarker {
-		return fmt.Errorf("end marker not found in archive")
+		return fmt.Errorf("RAR archive end marker (0x7B) not found after scanning %d file entries", len(r.Files))
 	}
 
 	return nil
@@ -552,7 +552,7 @@ func (r *Reader) readFiles() error {
 // parseFileHeader parses a file header and returns file info
 func (r *Reader) parseFileHeader(headerData []byte, position int64) (*File, error) {
 	if len(headerData) < 7 {
-		return nil, fmt.Errorf("header data too short")
+		return nil, fmt.Errorf("RAR file header data too short: got %d bytes, need at least 7", len(headerData))
 	}
 
 	headType := headerData[2]
@@ -560,12 +560,12 @@ func (r *Reader) parseFileHeader(headerData []byte, position int64) (*File, erro
 	headSize := int(binary.LittleEndian.Uint16(headerData[5:7]))
 
 	if headType != BlockFile {
-		return nil, fmt.Errorf("not a file block")
+		return nil, fmt.Errorf("expected RAR file block (0x74), got block type 0x%x at position %d", headType, position)
 	}
 
 	// Check if we have enough data
 	if len(headerData) < 32 {
-		return nil, fmt.Errorf("file header too short")
+		return nil, fmt.Errorf("RAR file header too short: got %d bytes, need at least 32", len(headerData))
 	}
 
 	// Parse basic file header fields

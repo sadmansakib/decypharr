@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
 )
 
 type Server struct {
@@ -73,7 +75,12 @@ func (s *Server) Start(ctx context.Context) error {
 
 	<-ctx.Done()
 	s.logger.Info().Msg("Shutting down gracefully...")
-	return srv.Shutdown(context.Background())
+
+	// Use a context with timeout for graceful shutdown
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	return srv.Shutdown(shutdownCtx)
 }
 
 func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {

@@ -114,7 +114,7 @@ func (f *File) servePreloadedContent(w http.ResponseWriter, r *http.Request) err
 		ranges, err := parseRange(rangeHeader, size)
 		if err != nil || len(ranges) != 1 {
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
-			return &streamError{Err: fmt.Errorf("invalid range"), StatusCode: http.StatusRequestedRangeNotSatisfiable}
+			return &streamError{Err: fmt.Errorf("invalid range header %q for content size %d: %w", rangeHeader, size, err), StatusCode: http.StatusRequestedRangeNotSatisfiable}
 		}
 
 		start, end := ranges[0].start, ranges[0].end
@@ -203,7 +203,7 @@ func (f *File) handleSuccessfulResponse(w http.ResponseWriter, resp *http.Respon
 func (f *File) streamBuffer(w http.ResponseWriter, src io.Reader, statusCode int) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return fmt.Errorf("response does not support flushing")
+		return fmt.Errorf("response writer type %T does not support flushing", w)
 	}
 
 	smallBuf := make([]byte, 64*1024) // 64 KB
@@ -321,7 +321,7 @@ func (f *File) Read(p []byte) (n int, err error) {
 	}
 
 	// For streaming files, return an error to force use of StreamResponse
-	return 0, fmt.Errorf("use StreamResponse method for streaming files")
+	return 0, fmt.Errorf("Read() not supported for streaming file %s, use StreamResponse method instead", f.name)
 }
 
 func (f *File) Seek(offset int64, whence int) (int64, error) {
@@ -355,7 +355,7 @@ func (f *File) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	// For streaming files, return error to force use of StreamResponse
-	return 0, fmt.Errorf("use StreamResponse method for streaming files")
+	return 0, fmt.Errorf("Seek() not supported for streaming file %s, use StreamResponse method instead", f.name)
 }
 
 func (f *File) Write(p []byte) (n int, err error) {

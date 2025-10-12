@@ -70,7 +70,8 @@ func checkFileStart(filePath string) error {
 }
 
 func collectFiles(media arr.Content) map[string][]arr.ContentFile {
-	uniqueParents := make(map[string][]arr.ContentFile)
+	// Pre-allocate with capacity hint based on number of files
+	uniqueParents := make(map[string][]arr.ContentFile, len(media.Files))
 	files := media.Files
 	for _, file := range files {
 		target := getSymlinkTarget(file.Path)
@@ -91,24 +92,34 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 
 	emptyFiles := make([]arr.ContentFile, 0)
 
-	r.logger.Debug().Msgf("Checking %s", torrentPath)
+	r.logger.Debug().
+		Str("torrent_path", torrentPath).
+		Msg("Checking torrent files")
 
 	// Get the debrid client
 	dir := filepath.Dir(torrentPath)
 	debridName := r.findDebridForPath(dir, clients)
 	if debridName == "" {
-		r.logger.Debug().Msgf("No debrid found for %s. Skipping", torrentPath)
+		r.logger.Debug().
+			Str("torrent_path", torrentPath).
+			Msg("No debrid found, skipping")
 		return emptyFiles
 	}
 
 	cache, ok := caches[debridName]
 	if !ok {
-		r.logger.Debug().Msgf("No cache found for %s. Skipping", debridName)
+		r.logger.Debug().
+			Str("debrid_name", debridName).
+			Str("torrent_path", torrentPath).
+			Msg("No cache found, skipping")
 		return emptyFiles
 	}
 	tor, ok := r.torrentsMap.Load(debridName)
 	if !ok {
-		r.logger.Debug().Msgf("Could not find torrents for %s. Skipping", debridName)
+		r.logger.Debug().
+			Str("debrid_name", debridName).
+			Str("torrent_path", torrentPath).
+			Msg("Could not find torrents, skipping")
 		return emptyFiles
 	}
 
@@ -118,7 +129,11 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 	torrentName := filepath.Clean(filepath.Base(torrentPath))
 	torrent, ok := torrentsMap[torrentName]
 	if !ok {
-		r.logger.Debug().Msgf("Can't find torrent %s in %s. Marking as broken", torrentName, debridName)
+		r.logger.Debug().
+			Str("torrent_name", torrentName).
+			Str("debrid_name", debridName).
+			Str("torrent_path", torrentPath).
+			Msg("Can't find torrent, marking as broken")
 		// Return all files as broken
 		return files
 	}
@@ -131,7 +146,11 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 
 	brokenFilePaths := cache.GetBrokenFiles(&torrent, filePaths)
 	if len(brokenFilePaths) > 0 {
-		r.logger.Debug().Msgf("%d broken files found in %s", len(brokenFilePaths), torrentName)
+		r.logger.Debug().
+			Str("torrent_name", torrentName).
+			Str("debrid_name", debridName).
+			Int("broken_count", len(brokenFilePaths)).
+			Msg("Broken files found in torrent")
 
 		// Create a set for O(1) lookup
 		brokenSet := make(map[string]bool, len(brokenFilePaths))

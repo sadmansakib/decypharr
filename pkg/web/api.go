@@ -2,13 +2,15 @@ package web
 
 import (
 	"fmt"
-	"github.com/sirrobot01/decypharr/pkg/wire"
-	"golang.org/x/crypto/bcrypt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/sirrobot01/decypharr/pkg/wire"
+	"golang.org/x/crypto/bcrypt"
+
 	"encoding/json"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
@@ -166,7 +168,7 @@ func (wb *Web) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No hash provided", http.StatusBadRequest)
 		return
 	}
-	wb.torrents.Delete(hash, category, removeFromDebrid)
+	wb.torrents.Delete(r.Context(), hash, category, removeFromDebrid)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -178,7 +180,7 @@ func (wb *Web) handleDeleteTorrents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hashes := strings.Split(hashesStr, ",")
-	wb.torrents.DeleteMultiple(hashes, removeFromDebrid)
+	wb.torrents.DeleteMultiple(r.Context(), hashes, removeFromDebrid)
 	w.WriteHeader(http.StatusOK)
 }
 

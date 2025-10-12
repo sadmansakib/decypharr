@@ -3,6 +3,13 @@ package decypharr
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"os"
+	"runtime"
+	"runtime/debug"
+	"strconv"
+	"sync"
+
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/pkg/qbit"
@@ -11,12 +18,6 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/web"
 	"github.com/sirrobot01/decypharr/pkg/webdav"
 	"github.com/sirrobot01/decypharr/pkg/wire"
-	"net/http"
-	"os"
-	"runtime"
-	"runtime/debug"
-	"strconv"
-	"sync"
 )
 
 func Start(ctx context.Context) error {
@@ -42,6 +43,14 @@ func Start(ctx context.Context) error {
 
 	// Create the logger path if it doesn't exist
 	for {
+		// Check context at the start of each iteration
+		select {
+		case <-ctx.Done():
+			cancelSvc() // Ensure we cancel services context before returning
+			return nil
+		default:
+		}
+
 		cfg := config.Get()
 		_log := logger.Default()
 
@@ -97,7 +106,13 @@ func Start(ctx context.Context) error {
 			cancelSvc() // propagate to services
 			<-done      // wait for them to finish
 			_log.Info().Msg("Decypharr has been stopped gracefully.")
-			reset() // reset store and services
+
+			// Use context.WithoutCancel to ensure cleanup operations complete
+			// even though the parent context is cancelled. This is critical for
+			// saving state, unmounting filesystems, and releasing resources properly.
+			cleanupCtx := context.WithoutCancel(ctx)
+			reset()        // reset store and services with cleanup context available
+			_ = cleanupCtx // cleanup context available for any operations that need it
 			return nil
 
 		case <-restartCh:

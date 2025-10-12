@@ -62,7 +62,7 @@ func New(name, host, token string, cleanup, skipRepair bool, downloadUncached *b
 	}
 }
 
-func (a *Arr) Request(method, endpoint string, payload interface{}) (*http.Response, error) {
+func (a *Arr) Request(method, endpoint string, payload any) (*http.Response, error) {
 	if a.Token == "" || a.Host == "" {
 		return nil, fmt.Errorf("arr not configured")
 	}

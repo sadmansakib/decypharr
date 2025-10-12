@@ -158,7 +158,7 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	category := getCategory(ctx)
 	for _, hash := range hashes {
-		q.storage.Delete(hash, category, false)
+		q.storage.Delete(ctx, hash, category, false)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -265,7 +265,7 @@ func (q *QBit) handleSetCategory(w http.ResponseWriter, r *http.Request) {
 	torrents := q.storage.GetAll("", "", hashes)
 	for _, torrent := range torrents {
 		torrent.Category = category
-		q.storage.AddOrUpdate(torrent)
+		q.storage.AddOrUpdate(ctx, torrent)
 	}
 	request.JSONResponse(w, nil, http.StatusOK)
 }
@@ -284,7 +284,7 @@ func (q *QBit) handleAddTorrentTags(w http.ResponseWriter, r *http.Request) {
 	}
 	torrents := q.storage.GetAll("", "", hashes)
 	for _, t := range torrents {
-		q.setTorrentTags(t, tags)
+		q.setTorrentTags(ctx, t, tags)
 	}
 	request.JSONResponse(w, nil, http.StatusOK)
 }
@@ -303,7 +303,7 @@ func (q *QBit) handleRemoveTorrentTags(w http.ResponseWriter, r *http.Request) {
 	}
 	torrents := q.storage.GetAll("", "", hashes)
 	for _, torrent := range torrents {
-		q.removeTorrentTags(torrent, tags)
+		q.removeTorrentTags(ctx, torrent, tags)
 
 	}
 	request.JSONResponse(w, nil, http.StatusOK)

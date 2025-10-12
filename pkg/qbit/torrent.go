@@ -3,13 +3,14 @@ package qbit
 import (
 	"context"
 	"fmt"
-	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/wire"
 	"io"
 	"mime/multipart"
 	"strings"
 	"time"
+
+	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/wire"
 )
 
 // All torrent-related helpers goes here
@@ -83,7 +84,7 @@ func (q *QBit) GetTorrentProperties(t *wire.Torrent) *TorrentProperties {
 	}
 }
 
-func (q *QBit) setTorrentTags(t *wire.Torrent, tags []string) bool {
+func (q *QBit) setTorrentTags(ctx context.Context, t *wire.Torrent, tags []string) bool {
 	torrentTags := strings.Split(t.Tags, ",")
 	for _, tag := range tags {
 		if tag == "" {
@@ -97,16 +98,16 @@ func (q *QBit) setTorrentTags(t *wire.Torrent, tags []string) bool {
 		}
 	}
 	t.Tags = strings.Join(torrentTags, ",")
-	q.storage.Update(t)
+	q.storage.Update(ctx, t)
 	return true
 }
 
-func (q *QBit) removeTorrentTags(t *wire.Torrent, tags []string) bool {
+func (q *QBit) removeTorrentTags(ctx context.Context, t *wire.Torrent, tags []string) bool {
 	torrentTags := strings.Split(t.Tags, ",")
 	newTorrentTags := utils.RemoveItem(torrentTags, tags...)
 	q.Tags = utils.RemoveItem(q.Tags, tags...)
 	t.Tags = strings.Join(newTorrentTags, ",")
-	q.storage.Update(t)
+	q.storage.Update(ctx, t)
 	return true
 }
 

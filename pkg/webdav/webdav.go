@@ -3,6 +3,7 @@ package webdav
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -108,15 +109,15 @@ func (wd *WebDav) Start(ctx context.Context) error {
 	}()
 
 	// Collect all errors
-	var errors []error
+	var errs []error
 	for err := range errChan {
 		if err != nil {
-			errors = append(errors, err)
+			errs = append(errs, err)
 		}
 	}
 
-	if len(errors) > 0 {
-		return fmt.Errorf("multiple handlers failed: %v", errors)
+	if len(errs) > 0 {
+		return fmt.Errorf("multiple handlers failed: %w", errors.Join(errs...))
 	}
 	return nil
 }

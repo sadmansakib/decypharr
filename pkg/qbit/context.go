@@ -62,7 +62,7 @@ func decodeAuthHeader(header string) (string, string, error) {
 	password := bearer[colonIndex+1:]
 
 	if username == "" || password == "" {
-		return username, password, fmt.Errorf("empty username or password")
+		return username, password, fmt.Errorf("authorization header contains empty username or password")
 	}
 
 	return strings.TrimSpace(username), strings.TrimSpace(password), nil
@@ -148,7 +148,7 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 	a.Token = password
 	arrValidated := false // This is a flag to indicate if arr validation was successful
 	if a.Host == "" || a.Token == "" && cfg.UseAuth {
-		return nil, fmt.Errorf("unauthorized: Host and token are required for authentication(you've enabled authentication)")
+		return nil, fmt.Errorf("unauthorized: host and token are required for authentication (UseAuth is enabled for category %q)", category)
 	}
 
 	if err := a.Validate(); err == nil {
@@ -158,7 +158,7 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 	if !arrValidated && cfg.UseAuth {
 		// If arr validation failed, try to use user auth validation
 		if !config.VerifyAuth(username, password) {
-			return nil, fmt.Errorf("unauthorized: invalid credentials")
+			return nil, fmt.Errorf("unauthorized: invalid credentials for user %q", username)
 		}
 	}
 	if arrValidated {
@@ -184,13 +184,13 @@ func extractFromSID(sid string) (string, string, error) {
 	// Decode base64
 	decoded, err := base64.URLEncoding.DecodeString(sid)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid SID format")
+		return "", "", fmt.Errorf("invalid SID format: base64 decode failed: %w", err)
 	}
 
 	// Split into parts: username:password:hash
 	parts := strings.Split(string(decoded), "|")
 	if len(parts) != 3 {
-		return "", "", fmt.Errorf("invalid SID structure")
+		return "", "", fmt.Errorf("invalid SID structure: expected 3 parts (username|password|hash), got %d", len(parts))
 	}
 
 	username := parts[0]
@@ -204,7 +204,7 @@ func extractFromSID(sid string) (string, string, error) {
 	expectedHashStr := fmt.Sprintf("%x", expectedHash)[:16]
 
 	if providedHash != expectedHashStr {
-		return "", "", fmt.Errorf("invalid SID signature")
+		return "", "", fmt.Errorf("invalid SID signature: hash verification failed for user %q", username)
 	}
 
 	return username, password, nil
