@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"context"
 	"crypto/md5"
 	"fmt"
 	"net/http"
@@ -358,8 +359,16 @@ func (s *Store) downloadFiles(torrent *Torrent, debridTorrent *types.Torrent, pa
 		wg.Add(1)
 		s.downloadSemaphore <- struct{}{}
 		go func(file types.File) {
-			defer wg.Done()
-			defer func() { <-s.downloadSemaphore }()
+			defer func() {
+				wg.Done()
+				<-s.downloadSemaphore
+				if r := recover(); r != nil {
+					s.logger.Error().
+						Interface("panic", r).
+						Str("file", file.Name).
+						Msg("Recovered from panic in download goroutine")
+				}
+			}()
 			filename := file.Name
 
 			err := grabber(
@@ -490,7 +499,7 @@ func (s *Store) getTorrentPaths(arrFolder string, debridTorrent *types.Torrent) 
 	}
 }
 
-func (s *Store) processMultiSeasonSymlinks(torrent *Torrent, debridTorrent *types.Torrent, seasons []SeasonInfo, importReq *ImportRequest) error {
+func (s *Store) processMultiSeasonSymlinks(ctx context.Context, torrent *Torrent, debridTorrent *types.Torrent, seasons []SeasonInfo, importReq *ImportRequest) error {
 	for _, seasonInfo := range seasons {
 		// Create a season-specific debrid torrent
 		seasonDebridTorrent := debridTorrent.Copy()
@@ -558,17 +567,17 @@ func (s *Store) processMultiSeasonSymlinks(torrent *Torrent, debridTorrent *type
 		seasonTorrent.ContentPath = torrentSymlinkPath
 		seasonTorrent.State = "pausedUP"
 		// Add the season torrent to storage
-		s.torrents.AddOrUpdate(seasonTorrent)
+		s.torrents.AddOrUpdate(ctx, seasonTorrent)
 
 		s.logger.Info().Str("path", torrentSymlinkPath).Msgf("Successfully created season %d torrent: %s", seasonInfo.SeasonNumber, seasonTorrent.ID)
 	}
-	s.torrents.Delete(torrent.Hash, "", false)
+	s.torrents.Delete(ctx, torrent.Hash, "", false)
 	s.logger.Info().Msgf("Multi-season processing completed for %s", debridTorrent.Name)
 	return nil
 }
 
 // processMultiSeasonDownloads handles multi-season torrent downloading
-func (s *Store) processMultiSeasonDownloads(torrent *Torrent, debridTorrent *types.Torrent, seasons []SeasonInfo, importReq *ImportRequest) error {
+func (s *Store) processMultiSeasonDownloads(ctx context.Context, torrent *Torrent, debridTorrent *types.Torrent, seasons []SeasonInfo, importReq *ImportRequest) error {
 	s.logger.Info().Msgf("Creating separate download records for %d seasons", len(seasons))
 	for _, seasonInfo := range seasons {
 		// Create a season-specific debrid torrent
@@ -596,7 +605,7 @@ func (s *Store) processMultiSeasonDownloads(torrent *Torrent, debridTorrent *typ
 
 		// Generate download links for season files
 		client := s.debrid.Debrid(debridTorrent.Debrid).Client()
-		if err := client.GetFileDownloadLinks(seasonDebridTorrent); err != nil {
+		if err := client.GetFileDownloadLinks(ctx, seasonDebridTorrent); err != nil {
 			s.logger.Error().Msgf("Failed to get download links for season %d: %v", seasonInfo.SeasonNumber, err)
 			return fmt.Errorf("failed to get download links for season %d: %v", seasonInfo.SeasonNumber, err)
 		}
@@ -614,11 +623,11 @@ func (s *Store) processMultiSeasonDownloads(torrent *Torrent, debridTorrent *typ
 		seasonTorrent.State = "pausedUP"
 
 		// Add the season torrent to storage
-		s.torrents.AddOrUpdate(seasonTorrent)
+		s.torrents.AddOrUpdate(ctx, seasonTorrent)
 		s.logger.Info().Msgf("Successfully downloaded season %d torrent: %s", seasonInfo.SeasonNumber, seasonTorrent.ID)
 	}
 	s.logger.Debug().Msgf("Deleting original torrent with hash: %s, category: %s", torrent.Hash, torrent.Category)
-	s.torrents.Delete(torrent.Hash, torrent.Category, false)
+	s.torrents.Delete(ctx, torrent.Hash, torrent.Category, false)
 
 	s.logger.Info().Msgf("Multi-season download processing completed for %s", debridTorrent.Name)
 	return nil

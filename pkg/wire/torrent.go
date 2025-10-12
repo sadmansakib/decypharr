@@ -42,12 +42,12 @@ func (s *Store) AddTorrent(ctx context.Context, importReq *ImportRequest) error 
 		}
 	}
 	torrent = s.partialTorrentUpdate(torrent, debridTorrent)
-	s.torrents.AddOrUpdate(torrent)
-	go s.processFiles(torrent, debridTorrent, importReq) // We can send async for file processing not to delay the response
+	s.torrents.AddOrUpdate(ctx, torrent)
+	go s.processFiles(ctx, torrent, debridTorrent, importReq) // We can send async for file processing not to delay the response
 	return nil
 }
 
-func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, importReq *ImportRequest) {
+func (s *Store) processFiles(ctx context.Context, torrent *Torrent, debridTorrent *types.Torrent, importReq *ImportRequest) {
 
 	if debridTorrent == nil {
 		// Early return if debridTorrent is nil
@@ -61,42 +61,61 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 	backoff := time.NewTimer(s.refreshInterval)
 	defer backoff.Stop()
 	for debridTorrent.Status != "downloaded" {
-		s.logger.Debug().Msgf("%s <- (%s) Download Progress: %.2f%%", debridTorrent.Debrid, debridTorrent.Name, debridTorrent.Progress)
-		dbT, err := client.CheckStatus(debridTorrent)
-		if err != nil {
-			s.logger.Error().
+		select {
+		case <-ctx.Done():
+			s.logger.Warn().
 				Str("torrent_id", debridTorrent.Id).
-				Str("torrent_name", debridTorrent.Name).
-				Err(err).
-				Msg("Error checking torrent status")
-			if dbT != nil && dbT.Id != "" {
-				// Delete the torrent if it was not downloaded
-				go func() {
-					_ = client.DeleteTorrent(dbT.Id)
-				}()
-			}
-			s.logger.Error().Msgf("Error checking status: %v", err)
-			s.markTorrentAsFailed(torrent)
-			go func() {
-				_arr.Refresh()
-			}()
-			importReq.markAsFailed(err, torrent, debridTorrent)
+				Err(ctx.Err()).
+				Msg("Context cancelled during file processing")
+			s.markTorrentAsFailed(ctx, torrent)
 			return
+		case <-backoff.C:
+			s.logger.Debug().Msgf("%s <- (%s) Download Progress: %.2f%%", debridTorrent.Debrid, debridTorrent.Name, debridTorrent.Progress)
+			dbT, err := client.CheckStatus(ctx, debridTorrent)
+			if err != nil {
+				s.logger.Error().
+					Str("torrent_id", debridTorrent.Id).
+					Str("torrent_name", debridTorrent.Name).
+					Err(err).
+					Msg("Error checking torrent status")
+				if dbT != nil && dbT.Id != "" {
+					// Delete the torrent if it was not downloaded
+					go func(ctx context.Context, id string) {
+						// Use context with timeout for cleanup operations
+						cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+						defer cancel()
+
+						if err := client.DeleteTorrent(cleanupCtx, id); err != nil {
+							s.logger.Warn().
+								Err(err).
+								Str("torrent_id", id).
+								Msg("Failed to delete failed torrent")
+						}
+					}(ctx, dbT.Id)
+				}
+				s.logger.Error().Msgf("Error checking status: %v", err)
+				s.markTorrentAsFailed(ctx, torrent)
+				go func() {
+					_arr.Refresh()
+				}()
+				importReq.markAsFailed(err, torrent, debridTorrent)
+				return
+			}
+
+			debridTorrent = dbT
+			torrent = s.partialTorrentUpdate(torrent, debridTorrent)
+
+			// Exit the loop for downloading statuses to prevent memory buildup
+			if debridTorrent.Status == "downloaded" || !utils.Contains(downloadingStatuses, debridTorrent.Status) {
+				goto processComplete
+			}
+
+			// Reset the backoff timer
+			nextInterval := min(s.refreshInterval*2, 30*time.Second)
+			backoff.Reset(nextInterval)
 		}
-
-		debridTorrent = dbT
-		torrent = s.partialTorrentUpdate(torrent, debridTorrent)
-
-		// Exit the loop for downloading statuses to prevent memory buildup
-		if debridTorrent.Status == "downloaded" || !utils.Contains(downloadingStatuses, debridTorrent.Status) {
-			break
-		}
-
-		<-backoff.C
-		// Reset the backoff timer
-		nextInterval := min(s.refreshInterval*2, 30*time.Second)
-		backoff.Reset(nextInterval)
 	}
+processComplete:
 	var torrentSymlinkPath, torrentRclonePath string
 	debridTorrent.Arr = _arr
 
@@ -104,30 +123,44 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 	timer := time.Now()
 
 	onFailed := func(err error) {
-		s.markTorrentAsFailed(torrent)
-		go func() {
-			if deleteErr := client.DeleteTorrent(debridTorrent.Id); deleteErr != nil {
+		s.markTorrentAsFailed(ctx, torrent)
+		go func(ctx context.Context) {
+			// Use context with timeout for cleanup
+			cleanupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+
+			if deleteErr := client.DeleteTorrent(cleanupCtx, debridTorrent.Id); deleteErr != nil {
 				s.logger.Warn().Err(deleteErr).Msgf("Failed to delete torrent %s", debridTorrent.Id)
 			}
-		}()
+		}(ctx)
 		s.logger.Error().Err(err).Msgf("Error occured while processing torrent %s", debridTorrent.Name)
 		importReq.markAsFailed(err, torrent, debridTorrent)
 	}
 
 	onSuccess := func(torrentSymlinkPath string) {
 		torrent.TorrentPath = torrentSymlinkPath
-		s.updateTorrent(torrent, debridTorrent)
+		s.updateTorrent(ctx, torrent, debridTorrent)
 		s.logger.Info().Msgf("Adding %s took %s", debridTorrent.Name, time.Since(timer))
 
 		go importReq.markAsCompleted(torrent, debridTorrent) // Mark the import request as completed, send callback if needed
-		go func() {
-			if err := request.SendDiscordMessage("download_complete", "success", torrent.discordContext()); err != nil {
-				s.logger.Error().Msgf("Error sending discord message: %v", err)
+		go func(ctx context.Context) {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if err := request.SendDiscordMessage("download_complete", "success", torrent.discordContext()); err != nil {
+					s.logger.Error().Msgf("Error sending discord message: %v", err)
+				}
 			}
-		}()
-		go func() {
-			_arr.Refresh()
-		}()
+		}(ctx)
+		go func(ctx context.Context) {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				_arr.Refresh()
+			}
+		}(ctx)
 	}
 
 	// Check for multi-season torrent support
@@ -157,7 +190,7 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 			s.logger.Info().Msgf("Processing multi-season torrent with %d seasons", len(seasons))
 
 			// Remove any torrent already added
-			err := s.processMultiSeasonSymlinks(torrent, debridTorrent, seasons, importReq)
+			err := s.processMultiSeasonSymlinks(ctx, torrent, debridTorrent, seasons, importReq)
 			if err == nil {
 				// If an error occurred during multi-season processing, send it to normal processing
 				s.logger.Info().Msgf("Adding %s took %s", debridTorrent.Name, time.Since(timer))
@@ -207,7 +240,7 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 
 		if isMultiSeason {
 			s.logger.Info().Msgf("Processing multi-season download with %d seasons", len(seasons))
-			err := s.processMultiSeasonDownloads(torrent, debridTorrent, seasons, importReq)
+			err := s.processMultiSeasonDownloads(ctx, torrent, debridTorrent, seasons, importReq)
 			if err != nil {
 				onFailed(err)
 				return
@@ -217,7 +250,7 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 			return
 		}
 
-		if err := client.GetFileDownloadLinks(debridTorrent); err != nil {
+		if err := client.GetFileDownloadLinks(ctx, debridTorrent); err != nil {
 			onFailed(err)
 			return
 		}
@@ -241,9 +274,9 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 	}
 }
 
-func (s *Store) markTorrentAsFailed(t *Torrent) *Torrent {
+func (s *Store) markTorrentAsFailed(ctx context.Context, t *Torrent) *Torrent {
 	t.State = "error"
-	s.torrents.AddOrUpdate(t)
+	s.torrents.AddOrUpdate(ctx, t)
 	go func() {
 		if err := request.SendDiscordMessage("download_failed", "error", t.discordContext()); err != nil {
 			s.logger.Error().Msgf("Error sending discord message: %v", err)
@@ -305,14 +338,14 @@ func (s *Store) partialTorrentUpdate(t *Torrent, debridTorrent *types.Torrent) *
 	return t
 }
 
-func (s *Store) updateTorrent(t *Torrent, debridTorrent *types.Torrent) *Torrent {
+func (s *Store) updateTorrent(ctx context.Context, t *Torrent, debridTorrent *types.Torrent) *Torrent {
 	if debridTorrent == nil {
 		return t
 	}
 
 	if debridClient := s.debrid.Clients()[debridTorrent.Debrid]; debridClient != nil {
 		if debridTorrent.Status != "downloaded" {
-			_ = debridClient.UpdateTorrent(debridTorrent)
+			_ = debridClient.UpdateTorrent(ctx, debridTorrent)
 		}
 	}
 	t = s.partialTorrentUpdate(t, debridTorrent)
@@ -320,7 +353,7 @@ func (s *Store) updateTorrent(t *Torrent, debridTorrent *types.Torrent) *Torrent
 
 	if t.IsReady() {
 		t.State = "pausedUP"
-		s.torrents.Update(t)
+		s.torrents.Update(ctx, t)
 		return t
 	}
 
@@ -329,13 +362,16 @@ func (s *Store) updateTorrent(t *Torrent, debridTorrent *types.Torrent) *Torrent
 
 	for {
 		select {
+		case <-ctx.Done():
+			s.logger.Debug().Msg("Update torrent cancelled")
+			return t
 		case <-ticker.C:
 			if t.IsReady() {
 				t.State = "pausedUP"
-				s.torrents.Update(t)
+				s.torrents.Update(ctx, t)
 				return t
 			}
-			updatedT := s.updateTorrent(t, debridTorrent)
+			updatedT := s.updateTorrent(ctx, t, debridTorrent)
 			t = updatedT
 
 		case <-time.After(10 * time.Minute): // Add a timeout

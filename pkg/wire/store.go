@@ -3,6 +3,9 @@ package wire
 import (
 	"cmp"
 	"context"
+	"sync"
+	"time"
+
 	"github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -11,8 +14,6 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/debrid"
 	"github.com/sirrobot01/decypharr/pkg/rclone"
 	"github.com/sirrobot01/decypharr/pkg/repair"
-	"sync"
-	"time"
 )
 
 type Store struct {
@@ -56,13 +57,14 @@ func Get() *Store {
 			scheduler, _ = gocron.NewScheduler(gocron.WithGlobalJobOptions(gocron.WithTags("decypharr-store")))
 		}
 
+		defaultLogger := logger.Default() // Use default logger [decypharr]
 		instance = &Store{
 			repair:            repair.New(arrs, deb),
 			arr:               arrs,
 			debrid:            deb,
 			rcloneManager:     rcManager,
-			torrents:          newTorrentStorage(cfg.TorrentsFile()),
-			logger:            logger.Default(), // Use default logger [decypharr]
+			torrents:          newTorrentStorage(cfg.TorrentsFile(), defaultLogger),
+			logger:            defaultLogger,
 			refreshInterval:   time.Duration(cmp.Or(qbitCfg.RefreshInterval, 30)) * time.Second,
 			skipPreCache:      qbitCfg.SkipPreCache,
 			downloadSemaphore: make(chan struct{}, cmp.Or(qbitCfg.MaxDownloads, 5)),

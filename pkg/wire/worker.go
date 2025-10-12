@@ -4,7 +4,8 @@ import "context"
 
 func (s *Store) StartWorkers(ctx context.Context) {
 	if ctx == nil {
-		ctx = context.Background()
+		s.logger.Error().Msg("Cannot start workers with nil context")
+		return
 	}
 
 	// Start debrid workers

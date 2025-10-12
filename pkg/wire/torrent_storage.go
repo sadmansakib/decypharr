@@ -1,12 +1,16 @@
 package wire
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 func keyPair(hash, category string) string {
@@ -19,6 +23,7 @@ type TorrentStorage struct {
 	torrents Torrents
 	mu       sync.RWMutex
 	filename string // Added to store the filename for persistence
+	logger   zerolog.Logger
 }
 
 func loadTorrentsFromJSON(filename string) (Torrents, error) {
@@ -33,7 +38,7 @@ func loadTorrentsFromJSON(filename string) (Torrents, error) {
 	return torrents, nil
 }
 
-func newTorrentStorage(filename string) *TorrentStorage {
+func newTorrentStorage(filename string, logger zerolog.Logger) *TorrentStorage {
 	// Open the JSON file and read the data
 	torrents, err := loadTorrentsFromJSON(filename)
 	if err != nil {
@@ -43,31 +48,64 @@ func newTorrentStorage(filename string) *TorrentStorage {
 	return &TorrentStorage{
 		torrents: torrents,
 		filename: filename,
+		logger:   logger,
 	}
 }
 
-func (ts *TorrentStorage) Add(torrent *Torrent) {
+func (ts *TorrentStorage) Add(ctx context.Context, torrent *Torrent) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.torrents[keyPair(torrent.Hash, torrent.Category)] = torrent
-	go func() {
+	go func(ctx context.Context) {
+		// Check if context is cancelled before expensive operation
+		select {
+		case <-ctx.Done():
+			ts.logger.Debug().
+				Str("operation", "Add").
+				Str("hash", torrent.Hash).
+				Msg("Save operation cancelled")
+			return
+		default:
+		}
+
 		err := ts.saveToFile()
 		if err != nil {
-			fmt.Println(err)
+			ts.logger.Error().
+				Err(err).
+				Str("operation", "Add").
+				Str("hash", torrent.Hash).
+				Str("category", torrent.Category).
+				Msg("Failed to save torrent storage")
 		}
-	}()
+	}(ctx)
 }
 
-func (ts *TorrentStorage) AddOrUpdate(torrent *Torrent) {
+func (ts *TorrentStorage) AddOrUpdate(ctx context.Context, torrent *Torrent) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.torrents[keyPair(torrent.Hash, torrent.Category)] = torrent
-	go func() {
+	go func(ctx context.Context) {
+		// Check if context is cancelled before expensive operation
+		select {
+		case <-ctx.Done():
+			ts.logger.Debug().
+				Str("operation", "AddOrUpdate").
+				Str("hash", torrent.Hash).
+				Msg("Save operation cancelled")
+			return
+		default:
+		}
+
 		err := ts.saveToFile()
 		if err != nil {
-			fmt.Println(err)
+			ts.logger.Error().
+				Err(err).
+				Str("operation", "AddOrUpdate").
+				Str("hash", torrent.Hash).
+				Str("category", torrent.Category).
+				Msg("Failed to save torrent storage")
 		}
-	}()
+	}(ctx)
 }
 
 func (ts *TorrentStorage) Get(hash, category string) *Torrent {
@@ -88,7 +126,7 @@ func (ts *TorrentStorage) Get(hash, category string) *Torrent {
 func (ts *TorrentStorage) GetAll(category string, filter string, hashes []string) []*Torrent {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
-	torrents := make([]*Torrent, 0)
+	torrents := make([]*Torrent, 0, len(ts.torrents))
 	for _, torrent := range ts.torrents {
 		if category != "" && torrent.Category != category {
 			continue
@@ -100,7 +138,7 @@ func (ts *TorrentStorage) GetAll(category string, filter string, hashes []string
 	}
 
 	if len(hashes) > 0 {
-		filtered := make([]*Torrent, 0)
+		filtered := make([]*Torrent, 0, len(hashes))
 		for _, hash := range hashes {
 			for _, torrent := range torrents {
 				if torrent.Hash == hash {
@@ -116,55 +154,75 @@ func (ts *TorrentStorage) GetAll(category string, filter string, hashes []string
 func (ts *TorrentStorage) GetAllSorted(category string, filter string, hashes []string, sortBy string, ascending bool) []*Torrent {
 	torrents := ts.GetAll(category, filter, hashes)
 	if sortBy != "" {
-		sort.Slice(torrents, func(i, j int) bool {
-			// If ascending is false, swap i and j to get descending order
-			if !ascending {
-				i, j = j, i
-			}
+		slices.SortFunc(torrents, func(a, b *Torrent) int {
+			var result int
 
 			switch sortBy {
 			case "name":
-				return torrents[i].Name < torrents[j].Name
+				result = cmp.Compare(a.Name, b.Name)
 			case "size":
-				return torrents[i].Size < torrents[j].Size
+				result = cmp.Compare(a.Size, b.Size)
 			case "added_on":
-				return torrents[i].AddedOn < torrents[j].AddedOn
+				result = cmp.Compare(a.AddedOn, b.AddedOn)
 			case "completed":
-				return torrents[i].Completed < torrents[j].Completed
+				result = cmp.Compare(a.Completed, b.Completed)
 			case "progress":
-				return torrents[i].Progress < torrents[j].Progress
+				result = cmp.Compare(a.Progress, b.Progress)
 			case "state":
-				return torrents[i].State < torrents[j].State
+				result = cmp.Compare(a.State, b.State)
 			case "category":
-				return torrents[i].Category < torrents[j].Category
+				result = cmp.Compare(a.Category, b.Category)
 			case "dlspeed":
-				return torrents[i].Dlspeed < torrents[j].Dlspeed
+				result = cmp.Compare(a.Dlspeed, b.Dlspeed)
 			case "upspeed":
-				return torrents[i].Upspeed < torrents[j].Upspeed
+				result = cmp.Compare(a.Upspeed, b.Upspeed)
 			case "ratio":
-				return torrents[i].Ratio < torrents[j].Ratio
+				result = cmp.Compare(a.Ratio, b.Ratio)
 			default:
 				// Default sort by added_on
-				return torrents[i].AddedOn < torrents[j].AddedOn
+				result = cmp.Compare(a.AddedOn, b.AddedOn)
 			}
+
+			// If descending order, negate the result
+			if !ascending {
+				result = -result
+			}
+
+			return result
 		})
 	}
 	return torrents
 }
 
-func (ts *TorrentStorage) Update(torrent *Torrent) {
+func (ts *TorrentStorage) Update(ctx context.Context, torrent *Torrent) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.torrents[keyPair(torrent.Hash, torrent.Category)] = torrent
-	go func() {
+	go func(ctx context.Context) {
+		// Check if context is cancelled before expensive operation
+		select {
+		case <-ctx.Done():
+			ts.logger.Debug().
+				Str("operation", "Update").
+				Str("hash", torrent.Hash).
+				Msg("Save operation cancelled")
+			return
+		default:
+		}
+
 		err := ts.saveToFile()
 		if err != nil {
-			fmt.Println(err)
+			ts.logger.Error().
+				Err(err).
+				Str("operation", "Update").
+				Str("hash", torrent.Hash).
+				Str("category", torrent.Category).
+				Msg("Failed to save torrent storage")
 		}
-	}()
+	}(ctx)
 }
 
-func (ts *TorrentStorage) Delete(hash, category string, removeFromDebrid bool) {
+func (ts *TorrentStorage) Delete(ctx context.Context, hash, category string, removeFromDebrid bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
@@ -181,7 +239,7 @@ func (ts *TorrentStorage) Delete(hash, category string, removeFromDebrid bool) {
 			if removeFromDebrid && torrent.DebridID != "" && torrent.Debrid != "" {
 				dbClient := wireStore.debrid.Client(torrent.Debrid)
 				if dbClient != nil {
-					_ = dbClient.DeleteTorrent(torrent.DebridID)
+					_ = dbClient.DeleteTorrent(ctx, torrent.DebridID)
 				}
 			}
 			delete(ts.torrents, key)
@@ -196,15 +254,31 @@ func (ts *TorrentStorage) Delete(hash, category string, removeFromDebrid bool) {
 			break
 		}
 	}
-	go func() {
+	go func(ctx context.Context) {
+		// Check if context is cancelled before expensive operation
+		select {
+		case <-ctx.Done():
+			ts.logger.Debug().
+				Str("operation", "Delete").
+				Str("hash", hash).
+				Msg("Save operation cancelled")
+			return
+		default:
+		}
+
 		err := ts.saveToFile()
 		if err != nil {
-			fmt.Println(err)
+			ts.logger.Error().
+				Err(err).
+				Str("operation", "Delete").
+				Str("hash", hash).
+				Str("category", category).
+				Msg("Failed to save torrent storage")
 		}
-	}()
+	}(ctx)
 }
 
-func (ts *TorrentStorage) DeleteMultiple(hashes []string, removeFromDebrid bool) {
+func (ts *TorrentStorage) DeleteMultiple(ctx context.Context, hashes []string, removeFromDebrid bool) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	toDelete := make(map[string]string)
@@ -235,27 +309,57 @@ func (ts *TorrentStorage) DeleteMultiple(hashes []string, removeFromDebrid bool)
 			}
 		}
 	}
-	go func() {
+	go func(ctx context.Context) {
+		// Check if context is cancelled before expensive operation
+		select {
+		case <-ctx.Done():
+			ts.logger.Debug().
+				Str("operation", "DeleteMultiple").
+				Int("count", len(hashes)).
+				Msg("Save operation cancelled")
+			return
+		default:
+		}
+
 		err := ts.saveToFile()
 		if err != nil {
-			fmt.Println(err)
+			ts.logger.Error().
+				Err(err).
+				Str("operation", "DeleteMultiple").
+				Int("count", len(hashes)).
+				Msg("Failed to save torrent storage")
 		}
-	}()
+	}(ctx)
 
 	clients := st.debrid.Clients()
 
-	go func() {
+	go func(ctx context.Context) {
 		for id, debrid := range toDelete {
+			// Check if context is cancelled before each deletion
+			select {
+			case <-ctx.Done():
+				ts.logger.Debug().
+					Str("operation", "DeleteMultiple").
+					Msg("Debrid deletion cancelled")
+				return
+			default:
+			}
+
 			dbClient, ok := clients[debrid]
 			if !ok {
 				continue
 			}
-			err := dbClient.DeleteTorrent(id)
+			err := dbClient.DeleteTorrent(ctx, id)
 			if err != nil {
-				fmt.Println(err)
+				ts.logger.Error().
+					Err(err).
+					Str("operation", "DeleteMultiple").
+					Str("debrid_id", id).
+					Str("debrid", debrid).
+					Msg("Failed to delete torrent from debrid")
 			}
 		}
-	}()
+	}(ctx)
 }
 
 func (ts *TorrentStorage) Save() error {
@@ -285,7 +389,7 @@ func (ts *TorrentStorage) Reset() {
 func (ts *TorrentStorage) GetStalledTorrents(removeAfter time.Duration) []*Torrent {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
-	stalled := make([]*Torrent, 0)
+	stalled := make([]*Torrent, 0, 10) // Preallocate with reasonable initial capacity
 	currentTime := time.Now()
 	for _, torrent := range ts.torrents {
 		if torrent.DebridID != "" && torrent.State == "downloading" && torrent.NumSeeds == 0 && torrent.Progress == 0 {

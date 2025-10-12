@@ -6,16 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
+	"sync"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"net/http"
-	"net/url"
-	"sync"
-	"time"
 )
 
 type ImportType string
@@ -141,7 +142,7 @@ func (iq *ImportQueue) Push(req *ImportRequest) error {
 
 	select {
 	case <-iq.ctx.Done():
-		return fmt.Errorf("queue is shutting down")
+		return iq.ctx.Err()
 	default:
 	}
 
@@ -160,7 +161,7 @@ func (iq *ImportQueue) Pop() (*ImportRequest, error) {
 
 	select {
 	case <-iq.ctx.Done():
-		return nil, fmt.Errorf("queue is shutting down")
+		return nil, iq.ctx.Err()
 	default:
 	}
 

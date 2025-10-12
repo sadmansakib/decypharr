@@ -31,7 +31,7 @@ func (s *Store) addToQueue(importReq *ImportRequest) error {
 func (s *Store) StartQueueWorkers(ctx context.Context) error {
 	// This function is responsible for starting the scheduled tasks
 	if ctx == nil {
-		ctx = context.Background()
+		return fmt.Errorf("context cannot be nil for StartQueueWorkers")
 	}
 
 	s.scheduler.RemoveByTags("decypharr-store")
@@ -149,7 +149,7 @@ func (s *Store) removeStalledTorrents(ctx context.Context) error {
 
 	for _, torrent := range stalledTorrents {
 		s.logger.Warn().Msgf("Removing stalled torrent: %s", torrent.Name)
-		s.torrents.Delete(torrent.Hash, torrent.Category, true) // Remove from store and delete from debrid
+		s.torrents.Delete(ctx, torrent.Hash, torrent.Category, true) // Remove from store and delete from debrid
 	}
 
 	return nil
@@ -177,7 +177,7 @@ func (s *Store) removeDeletedTorrents(ctx context.Context) {
 
 			// Delete from storage - don't try to delete from debrid (it's already gone)
 			// The third parameter (false) means don't delete from debrid
-			s.torrents.Delete(hash, "", false)
+			s.torrents.Delete(ctx, hash, "", false)
 		}
 	}
 }
