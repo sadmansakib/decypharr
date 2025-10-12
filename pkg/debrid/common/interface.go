@@ -9,24 +9,24 @@ import (
 )
 
 type Client interface {
-	SubmitMagnet(tr *types.Torrent) (*types.Torrent, error)
-	CheckStatus(tr *types.Torrent) (*types.Torrent, error)
-	GetFileDownloadLinks(tr *types.Torrent) error
-	GetDownloadLink(tr *types.Torrent, file *types.File) (types.DownloadLink, error)
-	DeleteTorrent(torrentId string) error
-	IsAvailable(infohashes []string) map[string]bool
+	SubmitMagnet(ctx context.Context, tr *types.Torrent) (*types.Torrent, error)
+	CheckStatus(ctx context.Context, tr *types.Torrent) (*types.Torrent, error)
+	GetFileDownloadLinks(ctx context.Context, tr *types.Torrent) error
+	GetDownloadLink(ctx context.Context, tr *types.Torrent, file *types.File) (types.DownloadLink, error)
+	DeleteTorrent(ctx context.Context, torrentId string) error
+	IsAvailable(ctx context.Context, infohashes []string) map[string]bool
 	GetDownloadUncached() bool
-	UpdateTorrent(torrent *types.Torrent) error
-	GetTorrent(torrentId string) (*types.Torrent, error)
+	UpdateTorrent(ctx context.Context, torrent *types.Torrent) error
+	GetTorrent(ctx context.Context, torrentId string) (*types.Torrent, error)
 	GetTorrents(ctx context.Context) ([]*types.Torrent, error)
 	Name() string
 	Logger() zerolog.Logger
 	GetDownloadingStatus() []string
-	RefreshDownloadLinks() error
-	CheckLink(link string) error
+	RefreshDownloadLinks(ctx context.Context) error
+	CheckLink(ctx context.Context, link string) error
 	GetMountPath() string
 	AccountManager() *account.Manager // Returns the active download account/token
-	GetProfile() (*types.Profile, error)
+	GetProfile(ctx context.Context) (*types.Profile, error)
 	GetAvailableSlots(ctx context.Context) (int, error)
-	SyncAccounts() error // Updates each accounts details(like traffic, username, etc.)
+	SyncAccounts(ctx context.Context) error // Updates each accounts details(like traffic, username, etc.)
 }
