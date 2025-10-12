@@ -106,7 +106,7 @@ func (c *Cache) GetBrokenFiles(t *CachedTorrent, filenames []string) []string {
 	wg.Add(len(files))
 
 	for _, f := range files {
-		go func(f types.File) {
+		go func(ctx context.Context, f types.File) {
 			defer wg.Done()
 
 			select {
@@ -130,7 +130,7 @@ func (c *Cache) GetBrokenFiles(t *CachedTorrent, filenames []string) []string {
 				return
 			}
 
-			if err := c.client.CheckLink(f.Link); err != nil {
+			if err := c.client.CheckLink(ctx, f.Link); err != nil {
 				if errors.Is(err, utils.HosterUnavailableError) {
 					mu.Lock()
 					if repairStrategy == config.RepairStrategyPerTorrent {
@@ -145,7 +145,7 @@ func (c *Cache) GetBrokenFiles(t *CachedTorrent, filenames []string) []string {
 					mu.Unlock()
 				}
 			}
-		}(f)
+		}(ctx, f)
 	}
 
 	wg.Wait()
@@ -177,6 +177,7 @@ func (c *Cache) repairWorker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			c.logger.Debug().Err(ctx.Err()).Msg("Repair worker shutting down")
 			return
 
 		case req, ok := <-c.repairChan:
@@ -234,6 +235,11 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 	}()
 
 	// Submit the magnet to the debrid service
+	// Use context.WithoutCancel to ensure this reinsert operation completes
+	// even if the parent context is cancelled during shutdown. This prevents
+	// partial state where a torrent is deleted but not reinserted, which could
+	// lead to data loss or inconsistent state.
+	reinsertCtx := context.WithoutCancel(context.Background())
 	newTorrent := &types.Torrent{
 		Name:             torrent.Name,
 		Magnet:           utils.ConstructMagnet(torrent.InfoHash, torrent.Name),
@@ -244,7 +250,7 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 		DownloadUncached: false,
 	}
 	var err error
-	newTorrent, err = c.client.SubmitMagnet(newTorrent)
+	newTorrent, err = c.client.SubmitMagnet(reinsertCtx, newTorrent)
 	if err != nil {
 		c.markAsFailedToReinsert(oldID)
 		// Remove the old torrent from the cache and debrid service
@@ -257,11 +263,13 @@ func (c *Cache) reInsertTorrent(ct *CachedTorrent) (*CachedTorrent, error) {
 		return ct, fmt.Errorf("failed to submit magnet: empty torrent")
 	}
 	newTorrent.DownloadUncached = false // Set to false, avoid re-downloading
-	newTorrent, err = c.client.CheckStatus(newTorrent)
+	// Use the same reinsertCtx to ensure status check completes
+	newTorrent, err = c.client.CheckStatus(reinsertCtx, newTorrent)
 	if err != nil {
 		if newTorrent != nil && newTorrent.Id != "" {
 			// Delete the torrent if it was not downloaded
-			_ = c.client.DeleteTorrent(newTorrent.Id)
+			// Use reinsertCtx to ensure cleanup completes even during shutdown
+			_ = c.client.DeleteTorrent(reinsertCtx, newTorrent.Id)
 		}
 		c.markAsFailedToReinsert(oldID)
 		return ct, fmt.Errorf("failed to check torrent: %w", err)

@@ -240,22 +240,44 @@ func (c *Cache) StreamWithRclone() bool {
 // Call this after stopping the old Cache (so no goroutines are holding references),
 // and before you discard the instance on a restart.
 func (c *Cache) Reset() {
+	// Save all torrents before cleanup to ensure state is persisted.
+	// This is a critical operation that must complete even during shutdown,
+	// so we don't pass a cancellable context here. The save operations
+	// are designed to be fast and should complete quickly.
+	c.logger.Info().
+		Str("provider", c.config.Name).
+		Str("operation", "reset").
+		Msg("Saving torrents before cleanup")
+	c.SaveTorrents()
 
 	// Unmount first
 	if c.mounter != nil && c.mounter.IsMounted() {
 		if err := c.mounter.Unmount(); err != nil {
-			c.logger.Error().Err(err).Msgf("Failed to unmount %s", c.config.Name)
+			c.logger.Error().
+				Err(err).
+				Str("provider", c.config.Name).
+				Str("operation", "unmount").
+				Msg("Failed to unmount")
 		} else {
-			c.logger.Info().Msgf("Unmounted %s", c.config.Name)
+			c.logger.Info().
+				Str("provider", c.config.Name).
+				Str("operation", "unmount").
+				Msg("Unmounted successfully")
 		}
 	}
 
 	if err := c.scheduler.StopJobs(); err != nil {
-		c.logger.Error().Err(err).Msg("Failed to stop scheduler jobs")
+		c.logger.Error().
+			Err(err).
+			Str("operation", "stop_scheduler_jobs").
+			Msg("Failed to stop scheduler jobs")
 	}
 
 	if err := c.scheduler.Shutdown(); err != nil {
-		c.logger.Error().Err(err).Msg("Failed to stop scheduler")
+		c.logger.Error().
+			Err(err).
+			Str("operation", "shutdown_scheduler").
+			Msg("Failed to stop scheduler")
 	}
 
 	// Stop the listing debouncer
@@ -296,14 +318,21 @@ func (c *Cache) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
-	c.logger.Info().Msgf("Started indexing...")
+	c.logger.Info().
+		Str("operation", "indexing").
+		Str("provider", c.client.Name()).
+		Msg("Started indexing")
 
 	if err := c.Sync(ctx); err != nil {
 		return fmt.Errorf("failed to sync cache: %w", err)
 	}
 	// Fire the ready channel
 	close(c.ready)
-	c.logger.Info().Msgf("Indexing complete, %d torrents loaded", len(c.torrents.getAll()))
+	c.logger.Info().
+		Str("operation", "indexing").
+		Str("provider", c.client.Name()).
+		Int("torrent_count", len(c.torrents.getAll())).
+		Msg("Indexing complete")
 
 	// initial download links
 	go c.refreshDownloadLinks(ctx)
@@ -312,14 +341,25 @@ func (c *Cache) Start(ctx context.Context) error {
 	cfg := config.Get()
 	name := c.client.Name()
 	addr := cfg.BindAddress + ":" + cfg.Port + cfg.URLBase + "webdav/" + name + "/"
-	c.logger.Info().Msgf("%s WebDav server running at %s", name, addr)
+	c.logger.Info().
+		Str("provider", name).
+		Str("address", addr).
+		Str("operation", "webdav_start").
+		Msg("WebDAV server running")
 
 	if c.mounter != nil {
 		if err := c.mounter.Mount(ctx); err != nil {
-			c.logger.Error().Err(err).Msgf("Failed to mount %s", c.config.Name)
+			c.logger.Error().
+				Err(err).
+				Str("provider", c.config.Name).
+				Str("operation", "mount").
+				Msg("Failed to mount")
 		}
 	} else {
-		c.logger.Warn().Msgf("Mounting is disabled for %s", c.config.Name)
+		c.logger.Warn().
+			Str("provider", c.config.Name).
+			Str("operation", "mount").
+			Msg("Mounting is disabled")
 	}
 	return nil
 }
@@ -359,57 +399,70 @@ func (c *Cache) load(ctx context.Context) (map[string]CachedTorrent, error) {
 	// Start workers
 	for i := 0; i < c.workers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(ctx context.Context) {
 			defer wg.Done()
 
 			for {
-				file, ok := <-workChan
-				if !ok {
-					return // Channel closed, exit goroutine
-				}
-
-				fileName := file.Name()
-				filePath := filepath.Join(c.dir, fileName)
-				data, err := os.ReadFile(filePath)
-				if err != nil {
-					c.logger.Error().Err(err).Msgf("Failed to read file: %s", filePath)
-					continue
-				}
-
-				var ct CachedTorrent
-				if err := json.Unmarshal(data, &ct); err != nil {
-					c.logger.Error().Err(err).Msgf("Failed to unmarshal file: %s", filePath)
-					continue
-				}
-
-				isComplete := true
-				if len(ct.GetFiles()) != 0 {
-					// Check if all files are valid, if not, delete the file.json and remove from cache.
-					fs := make(map[string]types.File, len(ct.GetFiles()))
-					for _, f := range ct.GetFiles() {
-						if f.Link == "" {
-							isComplete = false
-							break
-						}
-						f.TorrentId = ct.Id
-						fs[f.Name] = f
+				select {
+				case <-ctx.Done():
+					c.logger.Debug().Err(ctx.Err()).Msg("Load worker cancelled")
+					return // Context cancelled, exit goroutine
+				case file, ok := <-workChan:
+					if !ok {
+						return // Channel closed, exit goroutine
 					}
 
-					if isComplete {
+					fileName := file.Name()
+					filePath := filepath.Join(c.dir, fileName)
+					data, err := os.ReadFile(filePath)
+					if err != nil {
+						c.logger.Error().
+							Err(err).
+							Str("file_path", filePath).
+							Str("operation", "load_cache").
+							Msg("Failed to read file")
+						continue
+					}
 
-						if addedOn, err := time.Parse(time.RFC3339, ct.Added); err == nil {
-							ct.AddedOn = addedOn
+					var ct CachedTorrent
+					if err := json.Unmarshal(data, &ct); err != nil {
+						c.logger.Error().
+							Err(err).
+							Str("file_path", filePath).
+							Str("operation", "load_cache").
+							Msg("Failed to unmarshal file")
+						continue
+					}
+
+					isComplete := true
+					if len(ct.GetFiles()) != 0 {
+						// Check if all files are valid, if not, delete the file.json and remove from cache.
+						fs := make(map[string]types.File, len(ct.GetFiles()))
+						for _, f := range ct.GetFiles() {
+							if f.Link == "" {
+								isComplete = false
+								break
+							}
+							f.TorrentId = ct.Id
+							fs[f.Name] = f
 						}
-						ct.IsComplete = true
-						ct.Files = fs
-						ct.Name = path.Clean(ct.Name)
-						mu.Lock()
-						torrents[ct.Id] = ct
-						mu.Unlock()
+
+						if isComplete {
+
+							if addedOn, err := time.Parse(time.RFC3339, ct.Added); err == nil {
+								ct.AddedOn = addedOn
+							}
+							ct.IsComplete = true
+							ct.Files = fs
+							ct.Name = path.Clean(ct.Name)
+							mu.Lock()
+							torrents[ct.Id] = ct
+							mu.Unlock()
+						}
 					}
 				}
 			}
-		}()
+		}(ctx)
 	}
 
 	// Feed work to workers
@@ -434,7 +487,10 @@ func (c *Cache) load(ctx context.Context) (map[string]CachedTorrent, error) {
 func (c *Cache) Sync(ctx context.Context) error {
 	cachedTorrents, err := c.load(ctx)
 	if err != nil {
-		c.logger.Error().Err(err).Msg("Failed to load cache")
+		c.logger.Error().
+			Err(err).
+			Str("operation", "load_cache").
+			Msg("Failed to load cache")
 	}
 
 	torrents, err := c.client.GetTorrents(ctx)
@@ -444,9 +500,13 @@ func (c *Cache) Sync(ctx context.Context) error {
 
 	totalTorrents := len(torrents)
 
-	c.logger.Info().Msgf("%d torrents found from %s", totalTorrents, c.client.Name())
+	c.logger.Info().
+		Int("torrent_count", totalTorrents).
+		Str("provider", c.client.Name()).
+		Str("operation", "sync").
+		Msg("Torrents found from provider")
 
-	newTorrents := make([]*types.Torrent, 0)
+	newTorrents := make([]*types.Torrent, 0, totalTorrents)
 	idStore := make(map[string]struct{}, totalTorrents)
 	for _, t := range torrents {
 		idStore[t.Id] = struct{}{}
@@ -456,7 +516,7 @@ func (c *Cache) Sync(ctx context.Context) error {
 	}
 
 	// Check for deleted torrents
-	deletedTorrents := make([]string, 0)
+	deletedTorrents := make([]string, 0, len(cachedTorrents))
 	for _, t := range cachedTorrents {
 		if _, ok := idStore[t.Id]; !ok {
 			deletedTorrents = append(deletedTorrents, t.Id)
@@ -464,7 +524,10 @@ func (c *Cache) Sync(ctx context.Context) error {
 	}
 
 	if len(deletedTorrents) > 0 {
-		c.logger.Info().Msgf("Found %d deleted torrents", len(deletedTorrents))
+		c.logger.Info().
+			Int("deleted_count", len(deletedTorrents)).
+			Str("operation", "sync").
+			Msg("Found deleted torrents")
 		for _, id := range deletedTorrents {
 			// Remove from cache and debrid service
 			delete(cachedTorrents, id)
@@ -478,10 +541,16 @@ func (c *Cache) Sync(ctx context.Context) error {
 	c.setTorrents(cachedTorrents, func() {
 		c.listingDebouncer.Call(false)
 	}) // Initial calls
-	c.logger.Info().Msgf("Loaded %d torrents from cache", len(cachedTorrents))
+	c.logger.Info().
+		Int("cached_count", len(cachedTorrents)).
+		Str("operation", "sync").
+		Msg("Loaded torrents from cache")
 
 	if len(newTorrents) > 0 {
-		c.logger.Info().Msgf("Found %d new torrents", len(newTorrents))
+		c.logger.Info().
+			Int("new_count", len(newTorrents)).
+			Str("operation", "sync").
+			Msg("Found new torrents")
 		if err := c.sync(ctx, newTorrents); err != nil {
 			return fmt.Errorf("failed to sync torrents: %v", err)
 		}
@@ -515,16 +584,26 @@ func (c *Cache) sync(ctx context.Context, torrents []*types.Torrent) error {
 					}
 
 					if err := c.ProcessTorrent(t); err != nil {
-						c.logger.Error().Err(err).Str("torrent", t.Name).Msg("sync error")
+						c.logger.Error().
+							Err(err).
+							Str("torrent_name", t.Name).
+							Str("torrent_id", t.Id).
+							Str("operation", "sync").
+							Msg("Failed to process torrent")
 						atomic.AddInt64(&errorCount, 1)
 					}
 
 					count := atomic.AddInt64(&processed, 1)
 					if count%1000 == 0 {
-						c.logger.Info().Msgf("Progress: %d/%d torrents processed", count, len(torrents))
+						c.logger.Info().
+							Int64("processed", count).
+							Int("total", len(torrents)).
+							Str("operation", "sync").
+							Msg("Sync progress")
 					}
 
 				case <-ctx.Done():
+					c.logger.Debug().Err(ctx.Err()).Msg("Sync worker cancelled")
 					return // Context cancelled, exit goroutine
 				}
 			}
@@ -548,7 +627,11 @@ func (c *Cache) sync(ctx context.Context, torrents []*types.Torrent) error {
 	wg.Wait()
 
 	c.listingDebouncer.Call(false) // final refresh
-	c.logger.Info().Msgf("Sync complete: %d torrents processed, %d errors", len(torrents), errorCount)
+	c.logger.Info().
+		Int("processed", len(torrents)).
+		Int64("errors", errorCount).
+		Str("operation", "sync").
+		Msg("Sync complete")
 	return nil
 }
 
@@ -660,7 +743,11 @@ func (c *Cache) SaveTorrents() {
 func (c *Cache) SaveTorrent(ct CachedTorrent) {
 	marshaled, err := json.MarshalIndent(ct, "", "  ")
 	if err != nil {
-		c.logger.Error().Err(err).Msgf("Failed to marshal torrent: %s", ct.Id)
+		c.logger.Error().
+			Err(err).
+			Str("torrent_id", ct.Id).
+			Str("operation", "save_torrent").
+			Msg("Failed to marshal torrent")
 		return
 	}
 
@@ -673,20 +760,21 @@ func (c *Cache) SaveTorrent(ct CachedTorrent) {
 		jsonData: marshaled,
 	}
 
-	// Try to acquire semaphore without blocking
-	select {
-	case c.saveSemaphore <- struct{}{}:
-		go func() {
-			defer func() { <-c.saveSemaphore }()
-			c.saveTorrent(saveInfo.id, saveInfo.jsonData)
-		}()
-	default:
-		c.saveTorrent(saveInfo.id, saveInfo.jsonData)
-	}
+	// Properly use semaphore - block if full to enforce concurrency limit
+	c.saveSemaphore <- struct{}{}
+	go func() {
+		defer func() { <-c.saveSemaphore }()
+		if err := c.saveTorrent(saveInfo.id, saveInfo.jsonData); err != nil {
+			c.logger.Error().
+				Err(err).
+				Str("torrent_id", saveInfo.id).
+				Str("operation", "save_torrent").
+				Msg("Failed to save torrent")
+		}
+	}()
 }
 
-func (c *Cache) saveTorrent(id string, data []byte) {
-
+func (c *Cache) saveTorrent(id string, data []byte) error {
 	fileName := id + ".json"
 	filePath := filepath.Join(c.dir, fileName)
 
@@ -695,40 +783,38 @@ func (c *Cache) saveTorrent(id string, data []byte) {
 
 	f, err := os.Create(tmpFile)
 	if err != nil {
-		c.logger.Error().Err(err).Msgf("Failed to create file: %s", tmpFile)
-		return
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 
-	// Track if we've closed the file
-	fileClosed := false
+	// Ensure cleanup on error
+	success := false
 	defer func() {
-		// Only close if not already closed
-		if !fileClosed {
-			_ = f.Close()
+		_ = f.Close()
+		if !success {
+			_ = os.Remove(tmpFile)
 		}
-		// Clean up the temp file if it still exists and rename failed
-		_ = os.Remove(tmpFile)
 	}()
 
 	w := bufio.NewWriter(f)
 	if _, err := w.Write(data); err != nil {
-		c.logger.Error().Err(err).Msgf("Failed to write data: %s", tmpFile)
-		return
+		return fmt.Errorf("failed to write data: %w", err)
 	}
 
 	if err := w.Flush(); err != nil {
-		c.logger.Error().Err(err).Msgf("Failed to flush data: %s", tmpFile)
-		return
+		return fmt.Errorf("failed to flush data: %w", err)
 	}
 
 	// Close the file before renaming
-	_ = f.Close()
-	fileClosed = true
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
 
 	if err := os.Rename(tmpFile, filePath); err != nil {
-		c.logger.Error().Err(err).Msgf("Failed to rename file: %s", tmpFile)
-		return
+		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
+
+	success = true
+	return nil
 }
 
 func (c *Cache) ProcessTorrent(t *types.Torrent) error {
@@ -745,7 +831,7 @@ func (c *Cache) ProcessTorrent(t *types.Torrent) error {
 	}
 
 	if !isComplete(t.Files) {
-		if err := c.client.UpdateTorrent(t); err != nil {
+		if err := c.client.UpdateTorrent(context.Background(), t); err != nil {
 			return fmt.Errorf("failed to update torrent: %w", err)
 		}
 	}
@@ -776,8 +862,12 @@ func (c *Cache) ProcessTorrent(t *types.Torrent) error {
 
 func (c *Cache) Add(t *types.Torrent) error {
 	if len(t.Files) == 0 {
-		c.logger.Warn().Msgf("Torrent %s has no files to add. Refreshing", t.Id)
-		if err := c.client.UpdateTorrent(t); err != nil {
+		c.logger.Warn().
+			Str("torrent_id", t.Id).
+			Str("torrent_name", t.Name).
+			Str("operation", "add_torrent").
+			Msg("Torrent has no files, refreshing")
+		if err := c.client.UpdateTorrent(context.Background(), t); err != nil {
 			return fmt.Errorf("failed to update torrent: %w", err)
 		}
 	}
@@ -813,7 +903,7 @@ func (c *Cache) DeleteTorrent(id string) error {
 	return nil
 }
 
-func (c *Cache) validateAndDeleteTorrents(torrents []string) {
+func (c *Cache) validateAndDeleteTorrents(ctx context.Context, torrents []string) {
 	if len(torrents) == 0 {
 		return
 	}
@@ -821,15 +911,27 @@ func (c *Cache) validateAndDeleteTorrents(torrents []string) {
 	c.logger.Info().
 		Int("count", len(torrents)).
 		Strs("torrent_ids", torrents).
-		Msg("Detected torrents missing from API response - validating deletion")
+		Str("operation", "validate_deletion").
+		Msg("Detected torrents missing from API response")
 
 	wg := sync.WaitGroup{}
 	var deletedCount atomic.Int32
 
 	for _, torrent := range torrents {
 		wg.Add(1)
-		go func(t string) {
+		go func(ctx context.Context, t string) {
 			defer wg.Done()
+
+			select {
+			case <-ctx.Done():
+				c.logger.Debug().
+					Err(ctx.Err()).
+					Str("torrent_id", t).
+					Str("operation", "validate_deletion").
+					Msg("Validation cancelled")
+				return
+			default:
+			}
 
 			// Get torrent details before validation for better logging
 			cachedTorrent, exists := c.torrents.getByID(t)
@@ -839,13 +941,14 @@ func (c *Cache) validateAndDeleteTorrents(torrents []string) {
 			}
 
 			// Check if torrent is truly deleted
-			_, err := c.client.GetTorrent(t)
+			_, err := c.client.GetTorrent(ctx, t)
 			if err != nil {
 				c.logger.Warn().
 					Str("torrent_id", t).
 					Str("torrent_name", torrentName).
+					Str("operation", "validate_deletion").
 					Err(err).
-					Msg("Torrent confirmed deleted from debrid provider - removing from cache")
+					Msg("Torrent confirmed deleted from provider")
 
 				c.deleteTorrent(t, false) // Since it's removed from debrid already
 				deletedCount.Add(1)
@@ -853,15 +956,17 @@ func (c *Cache) validateAndDeleteTorrents(torrents []string) {
 				c.logger.Debug().
 					Str("torrent_id", t).
 					Str("torrent_name", torrentName).
-					Msg("Torrent still exists on debrid provider - skipping deletion")
+					Str("operation", "validate_deletion").
+					Msg("Torrent still exists on provider")
 			}
-		}(torrent)
+		}(ctx, torrent)
 	}
 	wg.Wait()
 
 	c.logger.Info().
 		Int("validated", len(torrents)).
 		Int("deleted", int(deletedCount.Load())).
+		Str("operation", "validate_deletion").
 		Msg("Completed torrent deletion validation")
 
 	c.listingDebouncer.Call(true)
@@ -876,7 +981,7 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 		defer func() {
 			c.removeFile(id, false)
 			if removeFromDebrid {
-				_ = c.client.DeleteTorrent(id) // Skip error handling, we don't care if it fails
+				_ = c.client.DeleteTorrent(context.Background(), id) // Skip error handling, we don't care if it fails
 			}
 		}() // defer delete from debrid
 
@@ -910,7 +1015,10 @@ func (c *Cache) deleteTorrent(id string, removeFromDebrid bool) bool {
 }
 
 func (c *Cache) DeleteTorrents(ids []string) {
-	c.logger.Info().Msgf("Deleting %d torrents", len(ids))
+	c.logger.Info().
+		Int("count", len(ids)).
+		Str("operation", "delete_torrents").
+		Msg("Deleting torrents")
 	for _, id := range ids {
 		_ = c.deleteTorrent(id, true)
 	}
@@ -929,7 +1037,11 @@ func (c *Cache) removeFile(torrentId string, moveToTrash bool) {
 	if !moveToTrash {
 		// If not moving to trash, delete the file directly
 		if err := os.Remove(filePath); err != nil {
-			c.logger.Error().Err(err).Msgf("Failed to remove file: %s", filePath)
+			c.logger.Error().
+				Err(err).
+				Str("file_path", filePath).
+				Str("operation", "remove_file").
+				Msg("Failed to remove file")
 			return
 		}
 		return
@@ -945,10 +1057,17 @@ func (c *Cache) removeFile(torrentId string, moveToTrash bool) {
 }
 
 func (c *Cache) OnRemove(torrentId string) {
-	c.logger.Debug().Msgf("OnRemove triggered for %s", torrentId)
+	c.logger.Debug().
+		Str("torrent_id", torrentId).
+		Str("operation", "on_remove").
+		Msg("OnRemove triggered")
 	err := c.DeleteTorrent(torrentId)
 	if err != nil {
-		c.logger.Error().Err(err).Msgf("Failed to delete torrent: %s", torrentId)
+		c.logger.Error().
+			Err(err).
+			Str("torrent_id", torrentId).
+			Str("operation", "on_remove").
+			Msg("Failed to delete torrent")
 		return
 	}
 }
@@ -956,7 +1075,11 @@ func (c *Cache) OnRemove(torrentId string) {
 // RemoveFile removes a file from the torrent cache
 // TODO sends a re-insert that removes the file from debrid
 func (c *Cache) RemoveFile(torrentId string, filename string) error {
-	c.logger.Debug().Str("torrent_id", torrentId).Msgf("Removing file %s", filename)
+	c.logger.Debug().
+		Str("torrent_id", torrentId).
+		Str("filename", filename).
+		Str("operation", "remove_file").
+		Msg("Removing file from torrent")
 	torrent, ok := c.torrents.getByID(torrentId)
 	if !ok {
 		return fmt.Errorf("torrent %s not found", torrentId)
@@ -970,7 +1093,10 @@ func (c *Cache) RemoveFile(torrentId string, filename string) error {
 
 	// If the torrent has no files left, delete it
 	if len(torrent.GetFiles()) == 0 {
-		c.logger.Debug().Msgf("Torrent %s has no files left, deleting it", torrentId)
+		c.logger.Debug().
+			Str("torrent_id", torrentId).
+			Str("operation", "remove_file").
+			Msg("Torrent has no files left, deleting")
 		if err := c.DeleteTorrent(torrentId); err != nil {
 			return fmt.Errorf("failed to delete torrent %s: %w", torrentId, err)
 		}

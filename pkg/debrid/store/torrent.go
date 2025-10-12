@@ -1,10 +1,11 @@
 package store
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,9 +96,9 @@ func newTorrentCache(dirFilters map[string][]directoryFilter) *torrentCache {
 
 func (tc *torrentCache) reset() {
 	tc.mu.Lock()
-	tc.torrents = tc.torrents[:0]       // Clear the slice
-	tc.idIndex = make(map[string]int)   // Reset the ID index
-	tc.nameIndex = make(map[string]int) // Reset the name index
+	tc.torrents = tc.torrents[:0] // Clear the slice
+	clear(tc.idIndex)             // Clear the ID index using built-in clear()
+	clear(tc.nameIndex)           // Clear the name index using built-in clear()
 	tc.deletedCount.Store(0)
 	tc.mu.Unlock()
 
@@ -290,11 +291,11 @@ func (tc *torrentCache) refreshListing() {
 	tc.sortNeeded.Store(false)
 	tc.mu.RUnlock()
 
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].name != all[j].name {
-			return all[i].name < all[j].name
+	slices.SortFunc(all, func(a, b sortableFile) int {
+		if result := cmp.Compare(a.name, b.name); result != 0 {
+			return result
 		}
-		return all[i].modTime.Before(all[j].modTime)
+		return a.modTime.Compare(b.modTime)
 	})
 
 	wg := sync.WaitGroup{}

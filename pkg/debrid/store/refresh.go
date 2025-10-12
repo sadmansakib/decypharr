@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,8 +72,8 @@ func (c *Cache) refreshTorrents(ctx context.Context) {
 	}
 
 	// Let's implement deleting torrents removed from debrid
-	deletedTorrents := make([]string, 0)
 	cachedTorrents := c.torrents.getIdMaps()
+	deletedTorrents := make([]string, 0, len(cachedTorrents))
 	for id := range cachedTorrents {
 		if _, exists := currentTorrentIds[id]; !exists {
 			deletedTorrents = append(deletedTorrents, id)
@@ -83,10 +84,10 @@ func (c *Cache) refreshTorrents(ctx context.Context) {
 		c.logger.Debug().
 			Int("count", len(deletedTorrents)).
 			Msg("Torrents detected as missing from API response - scheduling validation")
-		go c.validateAndDeleteTorrents(deletedTorrents)
+		go c.validateAndDeleteTorrents(ctx, deletedTorrents)
 	}
 
-	newTorrents := make([]*types.Torrent, 0)
+	newTorrents := make([]*types.Torrent, 0, len(debTorrents))
 	for _, t := range debTorrents {
 		if _, exists := cachedTorrents[t.Id]; !exists {
 			newTorrents = append(newTorrents, t)
@@ -106,16 +107,24 @@ func (c *Cache) refreshTorrents(ctx context.Context) {
 
 	for i := 0; i < c.workers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(ctx context.Context) {
 			defer wg.Done()
-			for t := range workChan {
-				if err := c.ProcessTorrent(t); err != nil {
-					c.logger.Error().Err(err).Msgf("Failed to process new torrent %s", t.Id)
-					errChan <- err
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case t, ok := <-workChan:
+					if !ok {
+						return
+					}
+					if err := c.ProcessTorrent(t); err != nil {
+						c.logger.Error().Err(err).Msgf("Failed to process new torrent %s", t.Id)
+						errChan <- err
+					}
+					counter++
 				}
-				counter++
 			}
-		}()
+		}(ctx)
 	}
 
 	for _, t := range newTorrents {
@@ -167,13 +176,20 @@ func (c *Cache) refreshRcloneWithRC(dirs []string) error {
 }
 
 func (c *Cache) buildRcloneRequestData(dirs []string) string {
+	// Pre-allocate capacity: estimate ~20 chars per dir entry
 	var data strings.Builder
+	data.Grow(len(dirs) * 20)
+
 	for index, dir := range dirs {
 		if dir != "" {
 			if index == 0 {
-				data.WriteString("dir=" + dir)
+				data.WriteString("dir=")
+				data.WriteString(dir)
 			} else {
-				data.WriteString("&dir" + fmt.Sprint(index+1) + "=" + dir)
+				data.WriteString("&dir")
+				data.WriteString(strconv.Itoa(index + 1))
+				data.WriteString("=")
+				data.WriteString(dir)
 			}
 		}
 	}
@@ -213,7 +229,7 @@ func (c *Cache) refreshTorrent(torrentId string) *CachedTorrent {
 		return nil
 	}
 
-	torrent, err := c.client.GetTorrent(torrentId)
+	torrent, err := c.client.GetTorrent(context.Background(), torrentId)
 	if err != nil {
 		c.logger.Error().Err(err).Msgf("Failed to get torrent %s", torrentId)
 		return nil
@@ -247,7 +263,7 @@ func (c *Cache) refreshDownloadLinks(ctx context.Context) {
 	}
 	defer c.downloadLinksRefreshMu.Unlock()
 
-	if err := c.client.RefreshDownloadLinks(); err != nil {
+	if err := c.client.RefreshDownloadLinks(ctx); err != nil {
 		c.logger.Error().Err(err).Msg("Failed to get download links")
 		return
 	}
